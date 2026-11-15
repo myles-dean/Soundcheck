@@ -137,9 +137,14 @@ final class AudioEngine {
     var isPlaying: Bool { apps.contains { $0.isPlaying } }
     var isListening: Bool { apps.contains { $0.isListening } }
     var listeningApps: [AudioApp] { apps.filter(\.isListening) }
-    /// The apps making sound and the pinned ones (and, while the panel is open, ones that just
-    /// went quiet).
-    var visibleApps: [AudioApp] { apps.filter { $0.isPlaying || heldApps.contains($0.id) || pinnedApps.contains($0.id) } }
+    /// The apps making sound and the pinned ones, open or not (and, while the panel is open, ones
+    /// that just went quiet).
+    var visibleApps: [AudioApp] {
+        let shown = apps.filter { $0.isPlaying || heldApps.contains($0.id) || pinnedApps.contains($0.id) }
+        let closed = pinnedApps.filter { id in !apps.contains { $0.id == id } }.map(AudioApp.pinned)
+        guard !closed.isEmpty else { return shown }
+        return (shown + closed).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
     /// Apps you can route into the microphone: the ones in the Apps list, plus the routed ones.
     var routableApps: [AudioApp] {
         apps.filter { $0.isPlaying || heldApps.contains($0.id) || pinnedApps.contains($0.id) || routedApps.contains($0.id) }
@@ -277,8 +282,10 @@ final class AudioEngine {
     @ObservationIgnored private var lastWrite: [String: Date] = [:]
     private func recentlyWritten(_ uid: String) -> Bool { Date().timeIntervalSince(lastWrite[uid] ?? .distantPast) < 0.6 }
     @ObservationIgnored private var wasActive = false
-    /// Launches of muted apps that have already been told they're muted (by process ID).
-    @ObservationIgnored private var warnedMuted: Set<pid_t> = []
+    /// Processes (by ID) that have made sound since Soundcheck started watching. An app gets a
+    /// new one each time it's opened, which is when a muted app is told it's muted again.
+    @ObservationIgnored private var soundedPIDs: Set<pid_t> = []
+    @ObservationIgnored private var hasSeenFirstApps = false
     @ObservationIgnored private var askingPermission = false
     /// The level Soundcheck gives each output that has no volume control of its own (most
     /// displays). One it hasn't seen yet starts at full, which is how macOS plays it.
@@ -296,7 +303,10 @@ final class AudioEngine {
             HALListener(.system, kAudioHardwarePropertyDefaultInputDevice) { [weak self] in self?.defaultInputChanged() },
         ].compactMap { $0 }
         monitor.onChange = { [weak self] in self?.processesChanged() }
-        monitor.onTick = { [weak self] in self?.idleQuietTaps() }
+        monitor.onTick = { [weak self] in
+            self?.idleQuietTaps()
+            self?.warnMutedApps()
+        }
         monitor.start()
 
         outputDevices = AudioDevice.list(.output)
@@ -1384,13 +1394,6 @@ final class AudioEngine {
         if isRouting && routedBefore != apps.filter({ routedApps.contains($0.id) }).flatMap(\.objects) { rebuildMixer() }
         updateDucking()
         if metering { updateAppMeters() }
-        // A muted app plays for the first time since it was opened: say so, once per launch (its
-        // process ID changes when it's quit and opened again).
-        for app in apps where app.isPlaying && mutedApps.contains(app.id) && !warnedMuted.contains(app.pid) {
-            warnedMuted.insert(app.pid)
-            onNotice?(HUDNotice(icon: app.icon, title: app.name, detail: "Muted"))
-        }
-        warnedMuted = warnedMuted.filter { NSRunningApplication(processIdentifier: $0)?.isTerminated == false }
         _ = appsBefore
         let active = isPlaying || isListening
         if active != wasActive {
@@ -1542,6 +1545,38 @@ final class AudioEngine {
     /// Lets the output idle once an app with its own tap has been quiet for half a minute. It
     /// stays muted at the source meanwhile, so it can't come back at full volume; its tap starts
     /// reading again as soon as it plays.
+    /// Muted, or turned all the way down.
+    private func isSilenced(_ id: String) -> Bool { mutedApps.contains(id) || appLevels.value(id) < 0.005 }
+
+    /// The first sound an app makes after it's opened: if it's muted (or all the way down), the
+    /// pill says so, once, until the app is quit and opened again. Muting an app that's already
+    /// been heard says nothing (you just did it). Browsers report playing as soon as they open,
+    /// before any sound, so an app with a tap of its own (every muted one) waits for real sound.
+    private func warnMutedApps() {
+        if !hasSeenFirstApps {
+            // Already playing when Soundcheck started: nothing new to say about those.
+            hasSeenFirstApps = true
+            soundedPIDs.formUnion(apps.filter(\.isPlaying).map(\.pid))
+            return
+        }
+        for app in apps where !soundedPIDs.contains(app.pid) {
+            let sounding: Bool
+            if let tap = appTaps[app.id], !tap.isSuspended {
+                sounding = tap.takePeak() > 0.001 // about -60 dB
+            } else {
+                sounding = app.isPlaying
+            }
+            guard sounding else { continue }
+            soundedPIDs.insert(app.pid)
+            if isSilenced(app.id) {
+                onNotice?(HUDNotice(icon: app.icon, title: app.name, detail: "Muted"))
+            }
+        }
+        if soundedPIDs.count > 200 {
+            soundedPIDs = soundedPIDs.filter { pid in kill(pid, 0) == 0 || errno == EPERM }
+        }
+    }
+
     private func idleQuietTaps() {
         // Allowed in System Settings since: start the taps that were waiting for it.
         if needsPermission, AudioCapturePermission.status == .allowed {

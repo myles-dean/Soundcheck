@@ -14,11 +14,25 @@ struct AudioApp: Identifiable, Equatable {
     /// Looked up once per app: a new image on every redraw makes rows flicker.
     @MainActor var icon: NSImage {
         if let icon = Self.icons[id] { return icon }
-        let icon = NSRunningApplication(processIdentifier: pid)?.icon ?? NSWorkspace.shared.icon(for: .applicationBundle)
+        let icon = NSRunningApplication(processIdentifier: pid)?.icon
+            ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: id).map { NSWorkspace.shared.icon(forFile: $0.path) }
+            ?? NSWorkspace.shared.icon(for: .applicationBundle)
         Self.icons[id] = icon
         return icon
     }
     @MainActor private static var icons: [String: NSImage] = [:]
+
+    /// A pinned app that isn't open or making sound yet, so it can still be set up: its volume
+    /// and mute apply as soon as it plays.
+    @MainActor static func pinned(_ id: String) -> AudioApp {
+        if let app = placeholders[id] { return app }
+        let name = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id)
+            .map { FileManager.default.displayName(atPath: $0.path).replacingOccurrences(of: ".app", with: "") } ?? id
+        let app = AudioApp(id: id, pid: 0, name: name, objects: [], isPlaying: false, isListening: false)
+        placeholders[id] = app
+        return app
+    }
+    @MainActor private static var placeholders: [String: AudioApp] = [:]
 }
 
 /// Watches Core Audio's list of processes: which apps are playing, which are listening to a

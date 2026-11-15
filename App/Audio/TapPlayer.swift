@@ -2,6 +2,7 @@ import AudioToolbox
 import CoreAudio
 import Foundation
 import os
+import Synchronization
 
 let log = Logger(subsystem: "com.mylesdean.Soundcheck", category: "audio")
 
@@ -52,6 +53,11 @@ final class TapPlayer {
     private let queue = DispatchQueue(label: "com.mylesdean.Soundcheck.io", qos: .userInteractive)
     private(set) var isSuspended = false
     var quietSince: Date?
+    /// The loudest sample tapped since `takePeak` (before the level is applied), as Float bits.
+    private let peakBits = Atomic<UInt32>(0)
+
+    /// How loud the tapped sound has been since the last call (0…1, before its level and mute).
+    func takePeak() -> Float { Float(bitPattern: peakBits.exchange(0, ordering: .relaxed)) }
 
     // Kept alive for the audio thread, which only touches the raw pointers below.
     private let gainValues: [SharedValue]
@@ -251,6 +257,12 @@ final class TapPlayer {
         let source = tap.mData?.assumingMemoryBound(to: Float.self)
         let level = tapMuted.pointee > 0.5 ? 0 : tapGain.pointee
         let ramp = self.ramp
+
+        if let source {
+            var peak: Float = 0
+            for sample in 0..<(inFrames * inChannels) { peak = max(peak, abs(source[sample])) }
+            if peak > Float(bitPattern: peakBits.load(ordering: .relaxed)) { peakBits.store(peak.bitPattern, ordering: .relaxed) }
+        }
 
         for index in 0..<outputs.count {
             let buffer = outputs[index]
