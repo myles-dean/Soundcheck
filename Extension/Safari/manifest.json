@@ -1,0 +1,13 @@
+{
+  "manifest_version": 2,
+  "name": "Soundcheck",
+  "description": "Gives each tab its own volume in Soundcheck, and lowers the other tabs and apps while a tab is on a call.",
+  "version": "1.0",
+  "icons": { "48": "icon-48.png", "96": "icon-96.png", "128": "icon-128.png" },
+  "permissions": ["tabs", "nativeMessaging", "<all_urls>"],
+  "background": { "scripts": ["background.js"], "persistent": true },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_start", "all_frames": true }
+  ],
+  "web_accessible_resources": ["page.js"]
+}

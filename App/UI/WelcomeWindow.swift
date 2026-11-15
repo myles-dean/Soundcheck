@@ -114,8 +114,10 @@ private struct WelcomeView: View {
                      text: "Play through one or several at once, AirPlay speakers like HomePod included, all in sync. Mix gives each its own volume.")
                 Step(symbol: "square.grid.2x2", title: "Apps",
                      text: "A volume for every app making sound; click an app's icon to mute it. Split sends an app to its own speakers.")
+                Step(symbol: "slider.vertical.3", title: "EQ",
+                     text: "The button next to a speaker's, app's or mic's bar opens its EQ. Speakers also get balance and mono, and headphones a volume limit.")
                 Step(symbol: "mic", title: "Mics",
-                     text: "Route mixes microphones and apps into Soundcheck Mic, for calls and streams.")
+                     text: "Route mixes microphones and apps into Soundcheck Mic, for calls and streams, with Voice Cleanup in Options. The headphones button next to a speaker's EQ plays your mic on it.")
                 Step(symbol: "speaker.wave.3", title: "The volume keys",
                      text: "Choose Speakers, Apps or Mics at the top, and the keys move that group together.")
             }
@@ -129,8 +131,17 @@ private struct WelcomeView: View {
             title("Settings")
             subtitle("Choose how Soundcheck behaves (they're under Options anytime). Open Saved Setups to set up pre-configured layouts.")
             ScrollView {
-                SettingsRows()
-                    .padding(.vertical, 6)
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(SettingsGroup.allCases) { group in
+                        VStack(alignment: .leading, spacing: 2) {
+                            SectionLabel(group.title)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 2)
+                            SettingsRows(group: group)
+                        }
+                    }
+                }
+                .padding(.vertical, 10)
             }
             .scrollIndicators(.automatic)
             .background(RoundedRectangle(cornerRadius: 14).fill(Color.primary.opacity(0.05)))

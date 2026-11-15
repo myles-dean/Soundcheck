@@ -140,26 +140,51 @@ final class AudioEngine {
     /// The apps making sound and the pinned ones, open or not (and, while the panel is open, ones
     /// that just went quiet).
     var visibleApps: [AudioApp] {
-        let shown = apps.filter { $0.isPlaying || heldApps.contains($0.id) || pinnedApps.contains($0.id) }
-        let closed = pinnedApps.filter { id in !apps.contains { $0.id == id } }.map(AudioApp.pinned)
-        guard !closed.isEmpty else { return shown }
-        return (shown + closed).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let shown = apps.filter { !$0.isSystem && ($0.isPlaying || heldApps.contains($0.id) || pinnedApps.contains($0.id)) }
+        let closed = pinnedApps.filter { id in id != AudioApp.systemID && !apps.contains { $0.id == id } }.map(AudioApp.pinned)
+        let sorted = closed.isEmpty ? shown
+            : (shown + closed).sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        // System (macOS's own sounds) is always there, at the end.
+        return sorted + [systemApp]
+    }
+
+    /// macOS's own sounds as an app: the running one, or a stand-in until one plays.
+    var systemApp: AudioApp { apps.first(where: \.isSystem) ?? AudioApp.pinned(AudioApp.systemID) }
+
+    /// The apps the closed Apps row names: System only while it's making a sound (or when it's all
+    /// there is).
+    var summaryApps: [AudioApp] {
+        let apps = visibleApps
+        let others = apps.filter { !$0.isSystem || $0.isPlaying }
+        return others.isEmpty ? apps : others
     }
     /// Apps you can route into the microphone: the ones in the Apps list, plus the routed ones.
     var routableApps: [AudioApp] {
-        apps.filter { $0.isPlaying || heldApps.contains($0.id) || pinnedApps.contains($0.id) || routedApps.contains($0.id) }
+        apps.filter { !$0.isSystem && ($0.isPlaying || heldApps.contains($0.id) || pinnedApps.contains($0.id) || routedApps.contains($0.id)) }
+            + [systemApp]
     }
     var isRouteOnly: Bool { isRouting && routeMics.isEmpty }
 
 
-    /// The outputs an app plays through: its own while split, otherwise the main ones.
+    /// The Mac's outputs an app plays through: its own while split, otherwise the main ones. An app
+    /// sent only to AirPlay speakers has none.
     func outputs(for id: String) -> [AudioDevice] {
         guard isSplit, let route = routes[id] else { return members }
         let present = route.compactMap { uid in outputDevices.first { $0.uid == uid } }
-        return present.isEmpty ? members : present
+        return present.isEmpty && airPlayRoute(for: id).isEmpty ? members : present
     }
 
-    func isRouted(_ id: String) -> Bool { outputs(for: id).map(\.uid) != memberUIDs }
+    /// The AirPlay speakers (IDs) an app is sent to while split: the ones in its route that are on.
+    func airPlayRoute(for id: String) -> [String] {
+        guard isSplit, let route = routes[id], !activeAirPlay.isEmpty else { return [] }
+        return route.compactMap { key in
+            guard key.hasPrefix("airplay:") else { return nil }
+            let speaker = String(key.dropFirst("airplay:".count))
+            return activeAirPlay.contains { $0.id == speaker } ? speaker : nil
+        }
+    }
+
+    func isRouted(_ id: String) -> Bool { !airPlayRoute(for: id).isEmpty || outputs(for: id).map(\.uid) != memberUIDs }
 
     @ObservationIgnored private let monitor = ProcessMonitor()
     @ObservationIgnored private var appTaps: [String: TapPlayer] = [:]
@@ -293,7 +318,12 @@ final class AudioEngine {
 
     private init() {}
 
+    @ObservationIgnored private var started = false
+
+    /// Once, at launch (a Shortcuts action that opens Soundcheck may get here first).
     func start() {
+        guard !started else { return }
+        started = true
         // Soundcheck's own audio IO mustn't keep the Mac awake.
         HAL.write(.system, kAudioHardwarePropertySleepingIsAllowed, value: UInt32(1))
         loadSettings()
@@ -321,6 +351,15 @@ final class AudioEngine {
         rememberNames()
         if !airPlayIDs.isEmpty { AirPlayBrowser.shared.start() }
         watchAirPlayBrowser()
+        // A setup that applies when an app opens.
+        appLaunchObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { note in
+            let id = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+            MainActor.assumeIsolated {
+                guard let id else { return }
+                AudioEngine.shared.applyAutomaticSetup { $0.kind == .appOpens && $0.id == id }
+            }
+        }
         // Soundcheck Mic is macOS's input while Soundcheck runs.
         if usesSoundcheckMic { takeOverInput() }
         outputsChanged()
@@ -476,6 +515,10 @@ final class AudioEngine {
             session.onError = { error in
                 DispatchQueue.main.async { MainActor.assumeIsolated { AudioEngine.shared.airPlayFailed(id, error) } }
             }
+            // Turned up or down on the speaker itself, with Siri, or from an iPhone or the Home app.
+            session.onSpeakerVolume = { volume in
+                DispatchQueue.main.async { MainActor.assumeIsolated { AudioEngine.shared.airPlaySpeakerChangedVolume(id, volume) } }
+            }
             // Apple TVs show a code the first time; it's typed into the AirPlay list.
             session.requestPIN = { reply in
                 DispatchQueue.main.async {
@@ -535,6 +578,21 @@ final class AudioEngine {
     @ObservationIgnored private var airPlayRetries: [String: Int] = [:]
     @ObservationIgnored private var airPlayWithoutPTP: Set<String> = []
 
+    /// The speaker's own volume changed (its buttons, Siri, an iPhone): its slider follows. When
+    /// it's the only speaker playing, that's the main level, as with any other speaker.
+    private func airPlaySpeakerChangedVolume(_ id: String, _ volume: Float) {
+        let key = Self.airPlayKey(id)
+        guard airPlayIDs.contains(id), !isMuted, !mutedSpeakers.contains(key) else { return }
+        guard abs(outputLevels.value(key) - volume) > 0.005 else { return }
+        if speakerKeys == [key] {
+            outputLevels.offsets[key] = nil
+            outputLevels.level = volume
+        } else {
+            outputLevels.set(volume, for: key)
+        }
+        volumesChanged()
+    }
+
     /// The connected sessions get the mix (each shifted by its sync adjustment), and the regular
     /// speakers wait as long as AirPlay takes.
     private func feedAirPlay() {
@@ -542,10 +600,20 @@ final class AudioEngine {
         // Each speaker is heard after its own delay; the slowest sets the pace, the faster ones are
         // sent their sound that much later, and the regular speakers wait as long as the slowest.
         let slowest = playing.values.map(\.playbackDelay).max() ?? 0
-        mainMixer?.feed.setSessions(playing.map { id, session in
-            (session, Int64((airPlaySync(id) - (slowest - session.playbackDelay)) * 44_100))
-        })
-        mainMixer?.setDelay(seconds: slowest)
+        guard let mixer = mainMixer else { return }
+        let targets = playing.map { id, session in
+            (id: id, target: (session: session, earlier: Int64((airPlaySync(id) - (slowest - session.playbackDelay)) * 44_100),
+                              shape: Optional(shapeControl(.speaker(Self.airPlayKey(id))))))
+        }
+        if mixer.airPlaySlots.isEmpty {
+            mixer.feeds[0].setSessions(targets.map(\.target))
+        } else {
+            // Each speaker from its own mix (the main mix plus any apps sent to it).
+            for (slot, id) in mixer.airPlaySlots.enumerated() where slot < mixer.feeds.count {
+                mixer.feeds[slot].setSessions(targets.filter { $0.id == id }.map(\.target))
+            }
+        }
+        mixer.setDelay(seconds: slowest)
     }
 
     /// How much earlier (seconds) an AirPlay speaker gets the sound, so it lines up with the
@@ -569,12 +637,20 @@ final class AudioEngine {
     }
 
     /// Adds or removes one of an app's own outputs. With none left it follows the main outputs.
-    func toggleRoute(_ device: AudioDevice, for id: String) {
+    func toggleRoute(_ device: AudioDevice, for id: String) { toggleRoute(key: device.uid, for: id) }
+
+    /// The same for an AirPlay speaker that's on.
+    func toggleRoute(_ speaker: AirPlaySpeaker, for id: String) { toggleRoute(key: Self.airPlayKey(speaker.id), for: id) }
+
+    private func toggleRoute(key: String, for id: String) {
         var route = routes[id] ?? []
-        if let index = route.firstIndex(of: device.uid) { route.remove(at: index) } else { route.append(device.uid) }
+        if let index = route.firstIndex(of: key) { route.remove(at: index) } else { route.append(key) }
         routes[id] = route.isEmpty ? nil : route
         outputsChanged()
     }
+
+    /// Whether an app's own route includes this AirPlay speaker.
+    func isRouted(_ id: String, to speaker: AirPlaySpeaker) -> Bool { airPlayRoute(for: id).contains(speaker.id) }
 
     func followMainOutputs(_ id: String) {
         routes[id] = nil
@@ -645,6 +721,7 @@ final class AudioEngine {
     }
 
     private func volumesChanged() {
+        enforceVolumeLimits()
         for device in activeOutputs where !device.hasHardwareVolume {
             softwareLevels[device.uid] = outputLevels.value(device.uid)
         }
@@ -660,22 +737,28 @@ final class AudioEngine {
         let scope = kAudioObjectPropertyScopeOutput
         for device in activeOutputs {
             let volume = outputLevels.value(device.uid)
+            let ownMute = mutedSpeakers.contains(device.uid)
+            let silent = isMuted || ownMute
             if device.hasHardwareVolume {
-                if abs((written[device.uid] ?? -1) - volume) > 0.001 {
-                    written[device.uid] = volume
+                let canMute = DeviceVolume.canMute(device.id, scope: scope)
+                // Muted on its own but without a mute of its own: turned to zero (its level is kept).
+                let target = ownMute && !canMute ? 0 : volume
+                if abs((written[device.uid] ?? -1) - target) > 0.001 {
+                    written[device.uid] = target
                     lastWrite[device.uid] = Date()
-                    VolumeWriter.shared.set(device.id, scope: scope, volume)
+                    VolumeWriter.shared.set(device.id, scope: scope, target)
                 }
-                if DeviceVolume.canMute(device.id, scope: scope), DeviceVolume.isMuted(device.id, scope: scope) != isMuted {
-                    DeviceVolume.setMuted(device.id, scope: scope, isMuted)
+                if canMute, DeviceVolume.isMuted(device.id, scope: scope) != silent {
+                    DeviceVolume.setMuted(device.id, scope: scope, silent)
                 }
                 softwareGain(device.uid).value = 1
             } else {
-                softwareGain(device.uid).value = isMuted ? 0 : Self.taper(volume)
+                softwareGain(device.uid).value = silent ? 0 : Self.taper(volume)
             }
         }
         for speaker in activeAirPlay {
-            airPlaySessions[speaker.id]?.setVolume(isMuted ? 0 : outputLevels.value(Self.airPlayKey(speaker.id)))
+            let key = Self.airPlayKey(speaker.id)
+            airPlaySessions[speaker.id]?.setVolume(isMuted || mutedSpeakers.contains(key) ? 0 : outputLevels.value(key))
         }
         othersGain.value = Self.taper(appLevels.base) * duckFactor
         for (id, gains) in appGains { gains.gain.value = appGain(id) }
@@ -684,7 +767,7 @@ final class AudioEngine {
     /// An app's gain: its level, its boost, and (unless it's the one on the call) the call ducking.
     private func appGain(_ id: String) -> Float {
         let boost = allowBoost ? (boosts[id] ?? 1) : 1
-        let duck = callApps.contains(id) ? 1 : duckFactor
+        let duck = callApps.contains(id) || duckExempt.contains(id) ? 1 : duckFactor
         // Past 100% the slider adds up to +12 dB (×4); TapPlayer keeps the peaks from clipping hard.
         return Self.taper(appLevels.value(id)) * boost * boost * duck
     }
@@ -728,7 +811,8 @@ final class AudioEngine {
     private func needsOwnTap(_ id: String) -> Bool {
         appLevels.hasOwnLevel(id) || mutedApps.contains(id) || isRouted(id)
             || (allowBoost && (boosts[id] ?? 1) > 1.001)
-            || (duckFactor < 0.999 && callApps.contains(id))
+            || appShapes[id]?.hasEQ == true
+            || (duckFactor < 0.999 && (callApps.contains(id) || duckExempt.contains(id)))
     }
 
     private func gains(for id: String) -> (gain: SharedValue, muted: SharedValue) {
@@ -760,27 +844,70 @@ final class AudioEngine {
 
     // MARK: Quiet Apps in Calls
 
-    /// Apps using a microphone (on a call); they're never ducked.
-    var callApps: Set<String> { Set(apps.filter(\.isListening).map(\.id)) }
-    /// 1 normally; eases down to the ducked level while a call is on, and back after.
-    @ObservationIgnored private var duckFactor: Float = 1
+    /// Apps using a microphone (on a call); they're never ducked. While a call rings, System (which
+    /// plays the ringtone) isn't either.
+    var callApps: Set<String> {
+        var ids = Set(apps.filter(\.isListening).map(\.id))
+        if monitor.isRinging { ids.insert(AudioApp.systemID) }
+        // A browser with a tab on a call (from Soundcheck's extension); its other tabs are lowered
+        // through the extension instead.
+        ids.formUnion(BrowserTabs.shared.callBrowsers)
+        return ids
+    }
+    /// On a call (an app using a microphone, or a browser tab on one), or one ringing.
+    var onCall: Bool { monitor.isRinging || apps.contains(where: \.isListening) || !BrowserTabs.shared.callBrowsers.isEmpty }
+
+    /// A browser tab joined or left a call.
+    func browserCallsChanged() {
+        syncTaps()
+        updateDucking()
+    }
+    /// 1 normally; eases down to the ducked level while a call is on, and back after. The gain the
+    /// other apps get is its cube.
+    @ObservationIgnored private var duckLevel: Float = 1
+    private var duckFactor: Float { duckLevel * duckLevel * duckLevel }
+    /// Apps kept at full while the others are lowered (see updateDucking).
+    @ObservationIgnored private var duckExempt: Set<String> = []
     @ObservationIgnored private var duckTimer: Timer?
 
+    /// Going down, the fade moves evenly in decibels over a second (a straight line in gain, or
+    /// even in the sliders' cube, drops most of the way in the first moments and sounds abrupt).
+    /// Coming back up is on the sliders' cube over 1.2 s, which sounds even on the way up.
     private func updateDucking() {
-        let target: Float = duckMode == .off || callApps.isEmpty ? 1 : (duckMode == .mute ? 0 : 0.2)
-        guard abs(target - duckFactor) > 0.001 || duckTimer != nil else { return }
+        // Lowered is 20% of the gain (about -14 dB).
+        let target: Float = duckMode == .off || !onCall ? 1 : (duckMode == .mute ? 0 : pow(0.2, 1.0 / 3))
+        guard abs(target - duckLevel) > 0.001 || duckTimer != nil else { return }
         duckTimer?.invalidate()
-        let start = duckFactor, began = Date(), duration = 0.6
-        if target < 1 { syncTaps() } // the taps carry the ducking, so they come first
-        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] timer in
+        if target < 1 {
+            // The apps on the call stay at full (with their own taps) until the others are all
+            // the way back, even once they've hung up: dropping their tap mid-fade would let them
+            // blip out at full volume before landing in the lowered mix.
+            duckExempt.formUnion(callApps)
+            syncTaps() // the taps carry the ducking, so they come first
+        }
+        let start = duckLevel, began = Date(), down = target < start, duration = down ? 1.0 : 1.2
+        // The call's browser lowers its other tabs itself, over the same time.
+        BrowserTabs.shared.duckOtherTabs(gain: target * target * target, seconds: duration)
+        // In decibels for the way down; silence is taken as -60 dB until the very end.
+        let startDecibels = max(60 * log10f(max(start, 1e-6)), -60)
+        let targetDecibels = max(60 * log10f(max(target, 1e-6)), -60)
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
                 guard let self else { timer.invalidate(); return }
                 let t = Float(min(Date().timeIntervalSince(began) / duration, 1))
-                self.duckFactor = start + (target - start) * (t * t * (3 - 2 * t))
+                let eased = t * t * (3 - 2 * t)
+                if down {
+                    let decibels = startDecibels + (targetDecibels - startDecibels) * eased
+                    // The level whose cube is that gain (gain = level³, so dB = 60·log10(level)).
+                    self.duckLevel = t >= 1 && target == 0 ? 0 : powf(10, decibels / 60)
+                } else {
+                    self.duckLevel = start + (target - start) * eased
+                }
                 self.applyVolumes()
                 if t >= 1 {
                     timer.invalidate()
                     self.duckTimer = nil
+                    if target >= 1 { self.duckExempt = [] }
                     self.syncTaps() // taps that were only there for the ducking go away
                 }
             }
@@ -885,9 +1012,26 @@ final class AudioEngine {
     }
 
     /// Options › Reset: Route off and back to one microphone, Split off, Mix closed with every
-    /// speaker at the loudest one's level, every app back to full (unmuted, no boost), and the
-    /// main slider back on Speakers.
+    /// speaker at the loudest one's level, every app back to full (unmuted, no boost), every EQ,
+    /// balance and mono flat, Hear Yourself off, nothing muted on its own, and the main slider back
+    /// on Speakers. Headphones' volume limits stay (they're for your ears). It can be undone for 5
+    /// seconds.
     func reset() {
+        resetSnapshot = ResetSnapshot(
+            isRouting: isRouting, routeMics: routeMics, routedApps: routedApps, isSplit: isSplit, routes: routes,
+            appLevels: appLevels, boosts: boosts, mutedApps: mutedApps, mixRequested: mixRequested, knob: knob,
+            outputLevels: outputLevels, mutedSpeakers: mutedSpeakers, mutedMics: mutedMics, mutedRouteApps: mutedRouteApps,
+            speakerShapes: speakerShapes, appShapes: appShapes, micShapes: micShapes,
+            hearYourselfPicks: hearYourselfPicks, hearYourselfMics: hearYourselfMics, hearYourselfMuted: hearYourselfMuted)
+        undoResetUntil = Date().addingTimeInterval(5)
+        undoExpiry?.cancel()
+        let expiry = DispatchWorkItem { [weak self] in
+            self?.resetSnapshot = nil
+            self?.undoResetUntil = nil
+        }
+        undoExpiry = expiry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: expiry)
+
         isRouting = false
         routeMics = []
         routedApps = []
@@ -895,16 +1039,94 @@ final class AudioEngine {
         routes = [:]
         appLevels = LinkedLevels()
         boosts = [:]
-        for id in mutedApps { gains(for: id).muted.value = 0 }
         mutedApps = []
         mixRequested = false
+        mutedSpeakers = []
+        mutedMics = []
+        mutedRouteApps = []
+        speakerShapes = [:]
+        appShapes = [:]
+        micShapes = [:]
+        hearYourselfPicks = []
+        hearYourselfMics = [:]
+        hearYourselfMuted = false
         knob = .speakers
-        outputsChanged()
+        settleAfterReset()
         evenOutSpeakers()
+    }
+
+    /// Back to how things were just before Reset (within 5 seconds of it).
+    func undoReset() {
+        guard let before = resetSnapshot else { return }
+        resetSnapshot = nil
+        undoResetUntil = nil
+        undoExpiry?.cancel()
+        isRouting = before.isRouting
+        routeMics = before.routeMics
+        routedApps = before.routedApps
+        isSplit = before.isSplit
+        routes = before.routes
+        appLevels = before.appLevels
+        boosts = before.boosts
+        mutedApps = before.mutedApps
+        mixRequested = before.mixRequested
+        knob = before.knob
+        outputLevels = before.outputLevels
+        mutedSpeakers = before.mutedSpeakers
+        mutedMics = before.mutedMics
+        mutedRouteApps = before.mutedRouteApps
+        speakerShapes = before.speakerShapes
+        appShapes = before.appShapes
+        micShapes = before.micShapes
+        hearYourselfPicks = before.hearYourselfPicks
+        hearYourselfMics = before.hearYourselfMics
+        hearYourselfMuted = before.hearYourselfMuted
+        settleAfterReset()
+    }
+
+    /// Puts the levels, mutes and shapes in place after Reset or its undo.
+    private func settleAfterReset() {
+        for (id, gains) in appGains { gains.muted.value = mutedApps.contains(id) ? 1 : 0 }
+        for (id, gain) in routeGains { gain.value = mutedRouteApps.contains(id) ? 0 : Self.taper(routeAppLevel(id)) }
+        for (target, control) in shapeControls { control.set(shape(target)) }
+        monitorGain.value = hearYourselfMuted ? 0 : Self.taper(hearYourselfLevel)
+        for key in Array(written.keys) { written[key] = nil }
+        for key in Array(writtenMic.keys) { writtenMic[key] = nil }
+        outputsChanged()
         refreshInput()
+        applyMicVolumes()
         rebuildMixer()
+        NotificationCenter.default.post(name: Self.didChangeVolume, object: nil)
         save()
     }
+
+    /// Everything Reset changes, kept for 5 seconds so it can be undone.
+    private struct ResetSnapshot {
+        var isRouting: Bool
+        var routeMics: [String]
+        var routedApps: Set<String>
+        var isSplit: Bool
+        var routes: [String: [String]]
+        var appLevels: LinkedLevels
+        var boosts: [String: Float]
+        var mutedApps: Set<String>
+        var mixRequested: Bool
+        var knob: Knob
+        var outputLevels: LinkedLevels
+        var mutedSpeakers: Set<String>
+        var mutedMics: Set<String>
+        var mutedRouteApps: Set<String>
+        var speakerShapes: [String: SoundShape]
+        var appShapes: [String: SoundShape]
+        var micShapes: [String: SoundShape]
+        var hearYourselfPicks: Set<String>
+        var hearYourselfMics: [String: [String]]
+        var hearYourselfMuted: Bool
+    }
+    @ObservationIgnored private var resetSnapshot: ResetSnapshot?
+    @ObservationIgnored private var undoExpiry: DispatchWorkItem?
+    /// Until when Reset can be undone (the Options row shows Undo till then).
+    private(set) var undoResetUntil: Date?
 
     /// While the panel or the volume pill is up (`reason`), apps keep their rows even when they go
     /// quiet for a moment, so the rows don't flicker.
@@ -932,6 +1154,8 @@ final class AudioEngine {
 
     /// The real microphone picked in the dropdown, which feeds Soundcheck Mic.
     private(set) var selectedMicUID: String?
+    /// Where it's saved (the watchdog reads it to give that microphone back after a crash).
+    nonisolated static let selectedMicrophoneKey = "selectedMicrophone"
     /// Soundcheck Mic is added, so it's the input and the dropdown picks what feeds it.
     var usesSoundcheckMic: Bool { isMicrophoneInstalled }
 
@@ -966,15 +1190,26 @@ final class AudioEngine {
     /// (some don't go fully silent at their lowest level), so zero means nothing gets through.
     private func applyMicVolumes() {
         let scope = kAudioObjectPropertyScopeInput
-        for device in activeMics {
-            let volume = micLevels.value(device.uid)
-            if abs((writtenMic[device.uid] ?? -1) - volume) > 0.001 {
-                writtenMic[device.uid] = volume
-                lastWrite[device.uid] = Date()
-                VolumeWriter.shared.set(device.id, scope: scope, volume)
+        for device in feedingMics {
+            let ownMute = mutedMics.contains(device.uid)
+            let canMute = DeviceVolume.canMute(device.id, scope: scope)
+            guard settableMics.contains(device.uid) else {
+                // No level to set from the Mac: only its own mute (Soundcheck Mic silences it too).
+                if canMute, DeviceVolume.isMuted(device.id, scope: scope) != (micsMuted || ownMute) {
+                    DeviceVolume.setMuted(device.id, scope: scope, micsMuted || ownMute)
+                }
+                continue
             }
-            let mute = micsMuted || volume < 0.001
-            if DeviceVolume.canMute(device.id, scope: scope), DeviceVolume.isMuted(device.id, scope: scope) != mute {
+            let volume = micLevels.value(device.uid)
+            // Muted on its own but without a mute of its own: turned to zero (its level is kept).
+            let target = ownMute && !canMute ? 0 : volume
+            if abs((writtenMic[device.uid] ?? -1) - target) > 0.001 {
+                writtenMic[device.uid] = target
+                lastWrite[device.uid] = Date()
+                VolumeWriter.shared.set(device.id, scope: scope, target)
+            }
+            let mute = micsMuted || ownMute || volume < 0.001
+            if canMute, DeviceVolume.isMuted(device.id, scope: scope) != mute {
                 DeviceVolume.setMuted(device.id, scope: scope, mute)
             }
         }
@@ -992,8 +1227,9 @@ final class AudioEngine {
     }
 
     private func updateMicGains() {
-        for device in feedingMics {
-            let silent = micsMuted || (settableMics.contains(device.uid) && micLevels.value(device.uid) < 0.001)
+        for device in feedingMics + hearYourselfOnlyMics {
+            let silent = micsMuted || mutedMics.contains(device.uid)
+                || (settableMics.contains(device.uid) && micLevels.value(device.uid) < 0.001)
             micGain(device.uid).value = silent ? 0 : 1
         }
     }
@@ -1144,11 +1380,18 @@ final class AudioEngine {
         let generation = mixerGeneration
         let old = mixer
         mixer = nil
-        let wanted = usesSoundcheckMic && !micsMuted && (microphoneInUse || metering)
+        let monitorTargets = hearYourselfOutputs
+        builtMonitorUIDs = monitorTargets.map(\.uid)
+        let wanted = usesSoundcheckMic && !micsMuted && (microphoneInUse || metering || !monitorTargets.isEmpty)
             && HAL.device(forUID: MicDriver.feedUID).isValid
         let routed = isRouting ? apps.filter { routedApps.contains($0.id) } : []
         let appSources = routed.map { (id: $0.id, processes: $0.objects, gain: routeGain($0.id)) }
-        let microphones = feedingMics.map { (uid: $0.uid, gain: micGain($0.uid)) }
+        // The microphones going into Soundcheck Mic, then any a speaker plays that don't.
+        let microphones = feedingMics.map { (uid: $0.uid, gain: micGain($0.uid), shape: shapeControl(.mic($0.uid)), feeds: true) }
+            + hearYourselfOnlyMics.map { (uid: $0.uid, gain: micGain($0.uid), shape: shapeControl(.mic($0.uid)), feeds: false) }
+        let monitor = monitorTargets.isEmpty || microphones.isEmpty ? nil
+            : MicMixer.Monitor(outputs: monitorTargets.map { (uid: $0.uid, gain: softwareGain($0.uid), microphones: hearYourselfMics[$0.uid]) },
+                               level: monitorGain)
         updateMicGains()
         guard wanted, !microphones.isEmpty || !appSources.isEmpty else {
             if let old { mixerQueue.async { old.invalidate() } }
@@ -1171,7 +1414,8 @@ final class AudioEngine {
             old?.invalidate()
             let made: MicMixer?
             do {
-                made = try MicMixer(feedUID: MicDriver.feedUID, microphones: microphones, apps: appSources)
+                made = try MicMixer(feedUID: MicDriver.feedUID, microphones: microphones, apps: appSources, monitor: monitor,
+                                    voice: MicMixer.Voice(cleanup: self.cleanupFlag, duckApps: self.duckVoiceFlag))
             } catch {
                 log.error("Soundcheck Mic failed: \(String(describing: error), privacy: .public)")
                 made = nil
@@ -1198,13 +1442,13 @@ final class AudioEngine {
 
     func setRouteAppLevel(_ level: Float, for id: String) {
         routeAppLevels[id] = level >= 0.999 ? nil : level
-        routeGain(id).value = Self.taper(level)
+        routeGain(id).value = mutedRouteApps.contains(id) ? 0 : Self.taper(level)
         save()
     }
 
     private func routeGain(_ id: String) -> SharedValue {
         if let gain = routeGains[id] { return gain }
-        let gain = SharedValue(Self.taper(routeAppLevel(id)))
+        let gain = SharedValue(mutedRouteApps.contains(id) ? 0 : Self.taper(routeAppLevel(id)))
         routeGains[id] = gain
         return gain
     }
@@ -1268,8 +1512,16 @@ final class AudioEngine {
 
     private func devicesChanged() {
         let before = Set(outputDevices.map(\.uid))
+        let seenBefore = before.union(inputDevices.map(\.uid))
         outputDevices = AudioDevice.list(.output)
         defer { rememberNames() }
+        // A setup that applies when one of these connects (after everything else here settles).
+        defer {
+            let connected = Set((outputDevices + AudioDevice.list(.input)).map(\.uid)).subtracting(seenBefore)
+            if !connected.isEmpty { applyAutomaticSetup { $0.kind == .deviceConnects && connected.contains($0.id) } }
+        }
+        // Headphones you hear yourself on came or went.
+        defer { if hearYourselfOutputs.map(\.uid) != builtMonitorUIDs { rebuildMixer() } }
         watchHeadphoneJack()
         if let headphones = outputDevices.first(where: { !before.contains($0.uid) && $0.isHeadphones }),
            switchToHeadphonesIfNew(headphones) {
@@ -1335,8 +1587,9 @@ final class AudioEngine {
             outputLevels.set(current, for: device.uid)
         }
         _ = uids
+        if hearYourselfOutputs.map(\.uid) != builtMonitorUIDs { rebuildMixer() }
         for device in active { written[device.uid] = nil } // write the remembered level
-        if let first = members.first, first.hasHardwareVolume {
+        if let first = members.first, first.hasHardwareVolume, !mutedSpeakers.contains(first.uid) {
             isMuted = DeviceVolume.canMute(first.id, scope: scope) && DeviceVolume.isMuted(first.id, scope: scope)
         }
         if active.map(\.id) != listenedOutputs {
@@ -1374,6 +1627,15 @@ final class AudioEngine {
 
     private func hardwareMuteChanged(_ device: AudioDevice) {
         let muted = DeviceVolume.isMuted(device.id, scope: kAudioObjectPropertyScopeOutput)
+        // A speaker muted on its own: unmuted somewhere else (Control Center, its own buttons)
+        // means it's back on; otherwise it's just Soundcheck's own mute.
+        if mutedSpeakers.contains(device.uid) {
+            if !muted && !isMuted {
+                mutedSpeakers.remove(device.uid)
+                volumesChanged()
+            }
+            return
+        }
         guard muted != isMuted else { return }
         isMuted = muted
         volumesChanged()
@@ -1409,17 +1671,70 @@ final class AudioEngine {
     private var needsGlobalTap: Bool {
         members.count > 1
             || members.contains { !$0.hasHardwareVolume && (isMuted || outputLevels.value($0.uid) < 0.999) }
+            || members.contains { !shape(.speaker($0.uid)).isFlat }
+            || nightMode
+            // Quiet Apps in Calls: carry the sound from when it starts playing, not from when a
+            // call starts. Taking it over has a tiny gap (the tapped path is a few ms longer), and
+            // there it'd land mid-song; this way a call only turns things down, which is smooth.
+            || (duckMode != .off && monitor.anyProcessPlaying)
             || appLevels.base < 0.999
             || duckFactor < 0.999
     }
 
+    // Making or removing a tap can make macOS restart the speaker's audio for a moment, which other
+    // apps hear as a pause. So a tap that's stopped being needed (an app slider dragged back to
+    // full, the apps' bar back to the top) stays a while first: at full it's inaudible, and a fast
+    // drag back and forth doesn't make and remove one on every pass.
+    private static let tapLinger: TimeInterval = 10
+    @ObservationIgnored private var ownTapWanted: [String: Date] = [:]
+    @ObservationIgnored private var globalTapWanted = Date.distantPast
+    @ObservationIgnored private var tapCleanup: DispatchWorkItem?
+
+    private func keepsOwnTap(_ id: String) -> Bool {
+        if needsOwnTap(id) {
+            ownTapWanted[id] = Date()
+            return true
+        }
+        guard let wanted = ownTapWanted[id] else { return false }
+        if Date().timeIntervalSince(wanted) < Self.tapLinger {
+            scheduleTapCleanup()
+            return true
+        }
+        ownTapWanted[id] = nil
+        return false
+    }
+
+    private var keepsGlobalTap: Bool {
+        if needsGlobalTap {
+            globalTapWanted = Date()
+            return true
+        }
+        if Date().timeIntervalSince(globalTapWanted) < Self.tapLinger {
+            scheduleTapCleanup()
+            return true
+        }
+        return false
+    }
+
+    /// Takes away the lingering taps once they've been unneeded for long enough.
+    private func scheduleTapCleanup() {
+        guard tapCleanup == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.tapCleanup = nil
+            self.syncTaps()
+        }
+        tapCleanup = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.tapLinger + 0.5, execute: work)
+    }
+
     private func syncTaps() {
         guard !members.isEmpty else { stopTaps(); return }
-        let memberGains = members.map { (uid: $0.uid, gain: softwareGain($0.uid)) }
+        let memberGains = members.map(tapOutput)
 
         // A tap without the System Audio Recording permission silences what it taps, so none
         // until macOS allows them (it asks the first time one is needed).
-        let wantsTaps = needsGlobalTap || apps.contains { needsOwnTap($0.id) } || (isRouting && !routedApps.isEmpty)
+        let wantsTaps = keepsGlobalTap || apps.contains { keepsOwnTap($0.id) } || (isRouting && !routedApps.isEmpty)
             || !activeAirPlay.isEmpty
         switch AudioCapturePermission.status {
         case .allowed:
@@ -1452,9 +1767,12 @@ final class AudioEngine {
         let mixing = !activeAirPlay.isEmpty
 
         // One tap per app with its own level, muted, or on its own outputs.
-        var wanted: [String: (app: AudioApp, outputs: [(uid: String, gain: SharedValue)])] = [:]
-        for app in apps where needsOwnTap(app.id) && (!mixing || isRouted(app.id)) {
-            wanted[app.id] = (app, outputs(for: app.id).map { (uid: $0.uid, gain: softwareGain($0.uid)) })
+        var wanted: [String: (app: AudioApp, outputs: [TapOutput])] = [:]
+        for app in apps where keepsOwnTap(app.id) && (!mixing || isRouted(app.id)) {
+            // An app sent only to AirPlay speakers plays through the main mixer instead.
+            let own = outputs(for: app.id)
+            guard !own.isEmpty else { continue }
+            wanted[app.id] = (app, own.map(tapOutput))
         }
         for (id, tap) in appTaps {
             guard let want = wanted[id], tap.outputUIDs == want.outputs.map(\.uid),
@@ -1467,7 +1785,8 @@ final class AudioEngine {
         for (id, want) in wanted where appTaps[id] == nil {
             let gains = gains(for: id)
             gains.gain.value = appGain(id)
-            if let tap = makeTap(.processes(want.app.objects), outputs: want.outputs, gain: gains.gain, muted: gains.muted) {
+            if let tap = makeTap(.processes(want.app.objects), outputs: want.outputs, gain: gains.gain, muted: gains.muted,
+                                 shape: shapeControl(.app(id))) {
                 appTaps[id] = tap
             }
         }
@@ -1483,7 +1802,7 @@ final class AudioEngine {
         stopAirPlay()
 
         // One more for everything else.
-        if needsGlobalTap && own.isValid {
+        if keepsGlobalTap && own.isValid {
             let excluded = ([own] + appTaps.values.flatMap { tap -> [AudioObjectID] in
                 if case .processes(let objects) = tap.source { return objects }
                 return []
@@ -1492,7 +1811,7 @@ final class AudioEngine {
                 return
             }
             globalTap?.invalidate()
-            globalTap = makeTap(.everythingExcept(excluded), outputs: memberGains, gain: othersGain, muted: unmuted)
+            globalTap = makeTap(.everythingExcept(excluded), outputs: memberGains, gain: othersGain, muted: unmuted, shape: nil)
         } else if let tap = globalTap {
             tap.invalidate()
             globalTap = nil
@@ -1502,13 +1821,18 @@ final class AudioEngine {
     /// The one mixer that carries the sound while AirPlay speakers play: each app with its own
     /// level, mute, boost or ducking as a source, then everything else at the apps' level.
     private func syncMainMixer(own: AudioObjectID) {
-        let outputs = members.map { (uid: $0.uid, gain: softwareGain($0.uid)) }
+        let outputs = members.map(tapOutput)
         var sources: [MainMixer.Source] = []
         var claimed: [AudioObjectID] = [own]
-        for app in apps where needsOwnTap(app.id) && !isRouted(app.id) {
+        // AirPlay speakers get a mix of their own only while an app is sent to one of them.
+        let slots = apps.contains { !airPlayRoute(for: $0.id).isEmpty } ? activeAirPlay.map(\.id) : []
+        for app in apps where keepsOwnTap(app.id) {
+            let airPlay = airPlayRoute(for: app.id)
+            guard !airPlay.isEmpty || !isRouted(app.id) else { continue } // on the Mac's own outputs only: its own tap
             let gains = gains(for: app.id)
             gains.gain.value = appGain(app.id)
-            sources.append(.init(tap: .processes(app.objects), gain: gains.gain, muted: gains.muted))
+            sources.append(.init(tap: .processes(app.objects), gain: gains.gain, muted: gains.muted, shape: shapeControl(.app(app.id)),
+                                 airPlay: airPlay.compactMap { slots.firstIndex(of: $0) }))
             claimed += app.objects
         }
         for tap in appTaps.values { if case .processes(let objects) = tap.source { claimed += objects } }
@@ -1516,13 +1840,14 @@ final class AudioEngine {
 
         let silent = !playsLocally
         if let mixer = mainMixer, mixer.outputUIDs == outputs.map(\.uid), mixer.sourceSignature == sources.map(\.tap),
-           mainMixerSilent == silent, mixer.isAlive {
+           mixer.sourceRouting == sources.map(\.airPlay), mixer.airPlaySlots == slots, mainMixerSilent == silent, mixer.isAlive {
             return
         }
         mainMixer?.invalidate()
         mainMixer = nil
         do {
-            mainMixer = try MainMixer(outputs: outputs, silent: silent, sources: sources, timeline: airPlayTimeline)
+            mainMixer = try MainMixer(outputs: outputs, silent: silent, sources: sources, airPlaySlots: slots, night: nightFlag,
+                                      timeline: airPlayTimeline)
             mainMixerSilent = silent
             needsPermission = false
         } catch let error as HALError {
@@ -1596,9 +1921,15 @@ final class AudioEngine {
         }
     }
 
-    private func makeTap(_ source: TapPlayer.Source, outputs: [(uid: String, gain: SharedValue)], gain: SharedValue, muted: SharedValue) -> TapPlayer? {
+    /// An output for a tap or the main mix: its software gain and its shape.
+    private func tapOutput(_ device: AudioDevice) -> TapOutput {
+        (uid: device.uid, gain: softwareGain(device.uid), shape: shapeControl(.speaker(device.uid)))
+    }
+
+    private func makeTap(_ source: TapPlayer.Source, outputs: [TapOutput], gain: SharedValue, muted: SharedValue,
+                         shape: ShapeControl?) -> TapPlayer? {
         do {
-            let tap = try TapPlayer(source: source, outputs: outputs, gain: gain, muted: muted)
+            let tap = try TapPlayer(source: source, outputs: outputs, gain: gain, muted: muted, shape: shape, night: nightFlag)
             needsPermission = false
             return tap
         } catch let error as HALError {
@@ -1608,6 +1939,332 @@ final class AudioEngine {
             log.error("Tap failed: \(error.localizedDescription, privacy: .public)")
         }
         return nil
+    }
+
+    // MARK: EQ, balance and mono
+
+    /// What a shape belongs to: a speaker (device UID, or an AirPlay speaker's key), an app
+    /// (bundle ID) or a microphone (device UID).
+    enum ShapeTarget: Hashable {
+        case speaker(String), app(String), mic(String)
+    }
+
+    /// Each speaker's, app's and microphone's shape (flat ones aren't kept).
+    private(set) var speakerShapes: [String: SoundShape] = [:]
+    private(set) var appShapes: [String: SoundShape] = [:]
+    private(set) var micShapes: [String: SoundShape] = [:]
+    /// The audio threads' copies, one per speaker, app and microphone, kept for as long as
+    /// Soundcheck runs (taps and mixes made later pick up the same one).
+    @ObservationIgnored private var shapeControls: [ShapeTarget: ShapeControl] = [:]
+
+    func shape(_ target: ShapeTarget) -> SoundShape {
+        switch target {
+        case .speaker(let key): speakerShapes[key] ?? SoundShape()
+        case .app(let id): appShapes[id] ?? SoundShape()
+        case .mic(let uid): micShapes[uid] ?? SoundShape()
+        }
+    }
+
+    /// Changes take effect straight away; a speaker or app going from flat to shaped (or back)
+    /// gets (or loses) the tap that carries it.
+    func setShape(_ shape: SoundShape, for target: ShapeTarget) {
+        let before = self.shape(target)
+        let kept: SoundShape? = shape.isFlat ? nil : shape
+        switch target {
+        case .speaker(let key): speakerShapes[key] = kept
+        case .app(let id): appShapes[id] = kept
+        case .mic(let uid): micShapes[uid] = kept
+        }
+        shapeControls[target]?.set(shape)
+        switch target {
+        case .speaker where before.isFlat != shape.isFlat: syncTaps()
+        case .app where before.hasEQ != shape.hasEQ: syncTaps()
+        default: break
+        }
+        save()
+    }
+
+    private func shapeControl(_ target: ShapeTarget) -> ShapeControl {
+        if let control = shapeControls[target] { return control }
+        let control = ShapeControl(shape(target))
+        shapeControls[target] = control
+        return control
+    }
+
+    // MARK: Night Mode, Voice Cleanup, and apps under your voice
+
+    /// Night Mode: everything that plays is evened out (loud parts down, quiet ones up).
+    private(set) var nightMode = false
+    /// Voice Cleanup: the microphones in Soundcheck Mic lose rumble and room noise between words,
+    /// and their level is evened out.
+    private(set) var voiceCleanup = false
+    /// Apps routed into Soundcheck Mic dip while you talk.
+    private(set) var duckUnderVoice = false
+    @ObservationIgnored private let nightFlag = SharedValue(0)
+    @ObservationIgnored private let cleanupFlag = SharedValue(0)
+    @ObservationIgnored private let duckVoiceFlag = SharedValue(0)
+
+    func setNightMode(_ on: Bool) {
+        nightMode = on
+        nightFlag.value = on ? 1 : 0
+        if on {
+            syncTaps()
+        } else {
+            // The compressor fades out first; then the tap only Night Mode needed can go.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.syncTaps() }
+        }
+        save()
+    }
+
+    func setVoiceCleanup(_ on: Bool) {
+        voiceCleanup = on
+        cleanupFlag.value = on ? 1 : 0
+        save()
+    }
+
+    func setDuckUnderVoice(_ on: Bool) {
+        duckUnderVoice = on
+        duckVoiceFlag.value = on ? 1 : 0
+        save()
+    }
+
+    // MARK: Volume limit (headphones)
+
+    /// The loudest each pair of headphones goes (by device UID); none means no limit.
+    private(set) var volumeLimits: [String: Float] = [:]
+
+    func volumeLimit(_ uid: String) -> Float? { volumeLimits[uid] }
+
+    func setVolumeLimit(_ limit: Float?, for uid: String) {
+        volumeLimits[uid] = limit.map { min(max($0, 0.05), 1) }
+        volumesChanged()
+    }
+
+    /// Headphones over their limit come down to it (the main slider and the volume keys stop
+    /// there too, since they follow the loudest speaker).
+    private func enforceVolumeLimits() {
+        for device in activeOutputs {
+            guard let limit = volumeLimits[device.uid], outputLevels.value(device.uid) > limit + 0.0005 else { continue }
+            if speakerKeys == [device.uid] {
+                outputLevels.offsets[device.uid] = nil
+                outputLevels.level = limit
+            } else {
+                outputLevels.set(limit, for: device.uid)
+            }
+        }
+    }
+
+    // MARK: Hear Yourself
+
+    /// The speakers you hear your microphones on (device UIDs), for streaming or podcasting. Kept
+    /// while they're unplugged, so headphones pick it up again when they're back in use.
+    private(set) var hearYourselfPicks: Set<String> = []
+    /// How loud you hear yourself (0...1).
+    private(set) var hearYourselfLevel: Float = 0.8
+    @ObservationIgnored private let monitorGain = SharedValue(0)
+    /// Where the last Soundcheck Mic mix plays you back.
+    @ObservationIgnored private var builtMonitorUIDs: [String] = []
+
+    /// Whether a speaker can play you back: one of the Mac's (AirPlay is seconds behind), with
+    /// Soundcheck Mic carrying the microphones.
+    func canHearYourself(on device: AudioDevice) -> Bool { usesSoundcheckMic && !device.isAirPlay }
+    func isHearingYourself(on device: AudioDevice) -> Bool { hearYourselfPicks.contains(device.uid) }
+
+    /// The speakers you hear yourself on right now: the ones you turned it on for that are in use
+    /// and playing.
+    var hearYourselfOutputs: [AudioDevice] {
+        guard usesSoundcheckMic, playsLocally, !hearYourselfPicks.isEmpty else { return [] }
+        return activeOutputs.filter { hearYourselfPicks.contains($0.uid) && !$0.isAirPlay }
+    }
+    /// Hearing yourself on speakers rather than headphones can echo.
+    var hearYourselfOnSpeakers: Bool { hearYourselfOutputs.contains { !$0.isHeadphones } }
+
+    /// The microphones a speaker plays when you've picked them (right-clicking its headphones
+    /// button); a speaker that isn't listed plays what goes into Soundcheck Mic.
+    private(set) var hearYourselfMics: [String: [String]] = [:]
+
+    /// The microphones you can pick to hear: every one connected except Soundcheck Mic itself.
+    var hearYourselfMicChoices: [AudioDevice] { inputDevices.filter { $0.uid != MicDriver.microphoneUID } }
+
+    /// Picked microphones that don't go into Soundcheck Mic: opened only to be heard.
+    var hearYourselfOnlyMics: [AudioDevice] {
+        let feeding = Set(feedingMics.map(\.uid))
+        var seen: Set<String> = []
+        return hearYourselfOutputs.flatMap { hearYourselfMics[$0.uid] ?? [] }.compactMap { uid in
+            guard !feeding.contains(uid), seen.insert(uid).inserted else { return nil }
+            return hearYourselfMicChoices.first { $0.uid == uid }
+        }
+    }
+
+    /// Whether a speaker plays what goes into Soundcheck Mic (as opposed to microphones picked for it).
+    func hearsSoundcheckMic(on device: AudioDevice) -> Bool {
+        hearYourselfPicks.contains(device.uid) && hearYourselfMics[device.uid] == nil
+    }
+
+    /// Whether a speaker plays a microphone you picked for it.
+    func hearsMic(_ uid: String, on device: AudioDevice) -> Bool {
+        hearYourselfPicks.contains(device.uid) && hearYourselfMics[device.uid]?.contains(uid) == true
+    }
+
+    /// The headphones button (left click): Soundcheck Mic on these speakers, or off.
+    func setHearYourself(_ on: Bool, on devices: [AudioDevice]) {
+        for device in devices {
+            if on { hearYourselfPicks.insert(device.uid) } else { hearYourselfPicks.remove(device.uid) }
+            hearYourselfMics[device.uid] = nil
+        }
+        rebuildMixer()
+        save()
+    }
+
+    /// The list's Soundcheck Mic row: these speakers play what goes into Soundcheck Mic (off if
+    /// they already all do).
+    func toggleHearSoundcheckMic(on devices: [AudioDevice]) {
+        setHearYourself(!devices.allSatisfy(hearsSoundcheckMic), on: devices)
+    }
+
+    /// A microphone's row: added to (or taken from) what these speakers play. Picking one moves a
+    /// speaker off Soundcheck Mic to just the ones picked; with none left, it's off.
+    func toggleHearMic(_ uid: String, on devices: [AudioDevice]) {
+        let on = !devices.allSatisfy { hearsMic(uid, on: $0) }
+        for device in devices {
+            var picked = hearYourselfPicks.contains(device.uid) ? (hearYourselfMics[device.uid] ?? []) : []
+            if on, !picked.contains(uid) { picked.append(uid) }
+            if !on { picked.removeAll { $0 == uid } }
+            if picked.isEmpty {
+                hearYourselfPicks.remove(device.uid)
+                hearYourselfMics[device.uid] = nil
+            } else {
+                hearYourselfPicks.insert(device.uid)
+                hearYourselfMics[device.uid] = picked
+            }
+        }
+        rebuildMixer()
+        save()
+    }
+
+    func setHearYourselfLevel(_ level: Float) {
+        hearYourselfLevel = min(max(level, 0), 1)
+        monitorGain.value = hearYourselfMuted ? 0 : Self.taper(hearYourselfLevel)
+        save()
+    }
+
+    // MARK: Muting one speaker, mic or routed app
+
+    // Each bar's own mute (the icon at its end). It's separate from the level: muted stays muted
+    // while the main slider or the volume keys move things, until it's clicked again.
+
+    /// Speakers muted on their own (device UIDs and AirPlay speakers' keys).
+    private(set) var mutedSpeakers: Set<String> = []
+    /// Microphones muted on their own (device UIDs).
+    private(set) var mutedMics: Set<String> = []
+    /// Routed apps muted inside Soundcheck Mic (they still play on the speakers).
+    private(set) var mutedRouteApps: Set<String> = []
+    /// Hear Yourself muted (where it plays is kept).
+    private(set) var hearYourselfMuted = false
+
+    func isSpeakerMuted(_ key: String) -> Bool { mutedSpeakers.contains(key) }
+    func isMicMuted(_ uid: String) -> Bool { mutedMics.contains(uid) }
+    func isRouteAppMuted(_ id: String) -> Bool { mutedRouteApps.contains(id) }
+
+    /// Every speaker in use is silent: muted together, or each on its own.
+    var speakersSilent: Bool {
+        isMuted || (!speakerKeys.isEmpty && speakerKeys.allSatisfy(mutedSpeakers.contains))
+    }
+
+    func setSpeakerMuted(_ muted: Bool, for key: String) {
+        if muted { mutedSpeakers.insert(key) } else { mutedSpeakers.remove(key) }
+        written[key] = nil
+        volumesChanged()
+    }
+
+    /// The main bar's mute: when every speaker in use was muted on its own, it unmutes them;
+    /// otherwise it mutes or unmutes them all together.
+    func toggleSpeakersMuted() {
+        if !isMuted && speakersSilent {
+            for key in speakerKeys {
+                mutedSpeakers.remove(key)
+                written[key] = nil
+            }
+            volumesChanged()
+        } else {
+            setMuted(!isMuted)
+        }
+    }
+
+    func setMicMuted(_ muted: Bool, for uid: String) {
+        if muted { mutedMics.insert(uid) } else { mutedMics.remove(uid) }
+        writtenMic[uid] = nil
+        applyMicVolumes()
+        NotificationCenter.default.post(name: Self.didChangeVolume, object: nil)
+        save()
+    }
+
+    func setRouteAppMuted(_ muted: Bool, for id: String) {
+        if muted { mutedRouteApps.insert(id) } else { mutedRouteApps.remove(id) }
+        routeGain(id).value = muted ? 0 : Self.taper(routeAppLevel(id))
+        save()
+    }
+
+    func setHearYourselfMuted(_ muted: Bool) {
+        hearYourselfMuted = muted
+        monitorGain.value = muted ? 0 : Self.taper(hearYourselfLevel)
+        save()
+    }
+
+    // MARK: Automatic setups
+
+    @ObservationIgnored private var appLaunchObserver: NSObjectProtocol?
+
+    /// Puts in place the setup whose trigger this is (the last one made, if several share it),
+    /// a moment later so macOS has finished switching things itself, and says so in the pill.
+    private func applyAutomaticSetup(_ matches: (SavedSetup.Trigger) -> Bool) {
+        guard let setup = SetupStore.shared.setups.last(where: { setup in
+            setup.trigger.map { !$0.id.isEmpty && matches($0) } == true
+        }) else { return }
+        let id = setup.id
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            MainActor.assumeIsolated {
+                let engine = AudioEngine.shared
+                guard let current = SetupStore.shared.setups.first(where: { $0.id == id }) else { return }
+                engine.apply(current)
+                engine.onNotice?(HUDNotice(symbol: "square.stack.3d.up", title: current.name, detail: "Applied"))
+            }
+        }
+    }
+
+    // MARK: Shortcuts
+
+    /// Plays through exactly these speakers (device UIDs and AirPlay speakers' keys); the first
+    /// regular one becomes macOS's output. AirPlay speakers on their own play without the others.
+    func playThrough(_ ids: [String]) {
+        let local = ids.compactMap { id in outputDevices.first { $0.uid == id } }
+        let airPlay = ids.filter { $0.hasPrefix("airplay:") }.map { String($0.dropFirst("airplay:".count)) }
+        guard !local.isEmpty || !airPlay.isEmpty else { return }
+        beforeHeadphones = nil
+        if let first = local.first {
+            members = local
+            if HAL.defaultOutput != first.id {
+                HAL.write(.system, kAudioHardwarePropertyDefaultOutputDevice, value: first.id)
+            }
+        }
+        if !airPlay.isEmpty { AirPlayBrowser.shared.start() }
+        for id in airPlay where !knownOutputs.contains(Self.airPlayKey(id)) {
+            knownOutputs.insert(Self.airPlayKey(id))
+            outputLevels.set(min(speakersVolume, 0.5), for: Self.airPlayKey(id))
+        }
+        airPlayIDs = airPlay
+        airPlayOnly = local.isEmpty
+        outputsChanged()
+    }
+
+    /// Apps you might want to set: playing, pinned, with a level or EQ of their own, routed, or
+    /// in a saved setup (bundle IDs).
+    var knownAppIDs: [String] {
+        var ids = apps.map(\.id) + [AudioApp.systemID] + Array(pinnedApps) + Array(appLevels.offsets.keys) + Array(appShapes.keys)
+            + Array(mutedApps) + Array(routedApps)
+        ids += SetupStore.shared.setups.flatMap { $0.apps.map(\.id) }
+        var seen: Set<String> = []
+        return ids.filter { seen.insert($0).inserted }
     }
 
     // MARK: Settings
@@ -1635,12 +2292,26 @@ final class AudioEngine {
         static let softwareLevels = "softwareLevels"
         static let routing = "routing"
         static let routeMics = "routeMicrophones"
-        static let selectedMic = "selectedMicrophone"
+        static let selectedMic = AudioEngine.selectedMicrophoneKey
         static let routeAppLevels = "routeAppLevels"
         static let airPlay = "airPlaySpeakers"
         static let airPlayOnly = "airPlayOnly"
         static let airPlaySyncs = "airPlaySync"
         static let routedApps = "routedApps"
+        static let speakerShapes = "speakerShapes"
+        static let appShapes = "appShapes"
+        static let micShapes = "micShapes"
+        static let volumeLimits = "volumeLimits"
+        static let hearYourselfLevel = "hearYourselfLevel"
+        static let hearYourselfPicks = "hearYourselfSpeakers"
+        static let mutedSpeakers = "mutedSpeakers"
+        static let mutedMics = "mutedMics"
+        static let mutedRouteApps = "mutedRouteApps"
+        static let hearYourselfMuted = "hearYourselfMuted"
+        static let hearYourselfMics = "hearYourselfMicrophones"
+        static let nightMode = "nightMode"
+        static let voiceCleanup = "voiceCleanup"
+        static let duckUnderVoice = "duckUnderVoice"
     }
 
     private func loadSettings() {
@@ -1685,6 +2356,28 @@ final class AudioEngine {
         defaults.removeObject(forKey: Keys.airPlaySyncs) // set by the old slider, which shifted the stream mid-flight
         airPlaySyncs = [:]
         routedApps = Set(defaults.stringArray(forKey: Keys.routedApps) ?? [])
+        func shapes(_ key: String) -> [String: SoundShape] {
+            defaults.data(forKey: key).flatMap { try? JSONDecoder().decode([String: SoundShape].self, from: $0) } ?? [:]
+        }
+        speakerShapes = shapes(Keys.speakerShapes)
+        appShapes = shapes(Keys.appShapes)
+        micShapes = shapes(Keys.micShapes)
+        volumeLimits = ((defaults.dictionary(forKey: Keys.volumeLimits) as? [String: Double]) ?? [:]).mapValues { Float($0) }
+        defaults.removeObject(forKey: "hearYourself") // a test build's on/off for all speakers
+        hearYourselfLevel = (defaults.object(forKey: Keys.hearYourselfLevel) as? NSNumber)?.floatValue ?? 0.8
+        hearYourselfPicks = Set(defaults.stringArray(forKey: Keys.hearYourselfPicks) ?? [])
+        mutedSpeakers = Set(defaults.stringArray(forKey: Keys.mutedSpeakers) ?? [])
+        mutedMics = Set(defaults.stringArray(forKey: Keys.mutedMics) ?? [])
+        mutedRouteApps = Set(defaults.stringArray(forKey: Keys.mutedRouteApps) ?? [])
+        hearYourselfMuted = defaults.bool(forKey: Keys.hearYourselfMuted)
+        hearYourselfMics = (defaults.dictionary(forKey: Keys.hearYourselfMics) as? [String: [String]]) ?? [:]
+        nightMode = defaults.bool(forKey: Keys.nightMode)
+        voiceCleanup = defaults.bool(forKey: Keys.voiceCleanup)
+        duckUnderVoice = defaults.bool(forKey: Keys.duckUnderVoice)
+        nightFlag.value = nightMode ? 1 : 0
+        cleanupFlag.value = voiceCleanup ? 1 : 0
+        duckVoiceFlag.value = duckUnderVoice ? 1 : 0
+        monitorGain.value = hearYourselfMuted ? 0 : Self.taper(hearYourselfLevel)
     }
 
     /// Saved a moment after the last change (the volume keys and sliders change things often).
@@ -1721,6 +2414,20 @@ final class AudioEngine {
             defaults.set(self.airPlayOnly, forKey: Keys.airPlayOnly)
             defaults.set(self.airPlaySyncs, forKey: Keys.airPlaySyncs)
             defaults.set(Array(self.routedApps), forKey: Keys.routedApps)
+            defaults.set(try? JSONEncoder().encode(self.speakerShapes), forKey: Keys.speakerShapes)
+            defaults.set(try? JSONEncoder().encode(self.appShapes), forKey: Keys.appShapes)
+            defaults.set(try? JSONEncoder().encode(self.micShapes), forKey: Keys.micShapes)
+            defaults.set(self.volumeLimits.mapValues { Double($0) }, forKey: Keys.volumeLimits)
+            defaults.set(self.hearYourselfLevel, forKey: Keys.hearYourselfLevel)
+            defaults.set(Array(self.hearYourselfPicks), forKey: Keys.hearYourselfPicks)
+            defaults.set(Array(self.mutedSpeakers), forKey: Keys.mutedSpeakers)
+            defaults.set(Array(self.mutedMics), forKey: Keys.mutedMics)
+            defaults.set(Array(self.mutedRouteApps), forKey: Keys.mutedRouteApps)
+            defaults.set(self.hearYourselfMuted, forKey: Keys.hearYourselfMuted)
+            defaults.set(self.hearYourselfMics, forKey: Keys.hearYourselfMics)
+            defaults.set(self.nightMode, forKey: Keys.nightMode)
+            defaults.set(self.voiceCleanup, forKey: Keys.voiceCleanup)
+            defaults.set(self.duckUnderVoice, forKey: Keys.duckUnderVoice)
         }
         saveWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: work)

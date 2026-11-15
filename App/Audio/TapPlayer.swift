@@ -33,10 +33,15 @@ private func check(_ status: OSStatus, _ what: String) throws {
     guard status == noErr else { throw HALError(status: status, what: what) }
 }
 
+/// An output a tap plays through: its UID, its software gain (1 when the device's own volume
+/// does the job) and its shape (EQ, balance, mono).
+typealias TapOutput = (uid: String, gain: SharedValue, shape: ShapeControl)
+
 /// Plays tapped sound through one or more outputs at a chosen level: a process tap (one app's
 /// sound, or everything except some processes) muted at the source, and a private aggregate
 /// device made of the outputs plus the tap, whose IO proc copies the tap to every output with
-/// the gains applied. Releasing the tap gives the app its own sound back.
+/// the gains applied, the app's EQ first and each output's shape after. Releasing the tap gives
+/// the app its own sound back.
 final class TapPlayer {
     enum Source: Equatable {
         case processes([AudioObjectID])
@@ -69,12 +74,25 @@ final class TapPlayer {
     private let bufferGain: UnsafeMutablePointer<Float>
     private let bufferCount: Int
     private let ramp: Float
+    /// The app's own shape, on a stereo copy of the tap, and each output buffer's shape.
+    private static let maxFrames = 8192
+    private let scratch: UnsafeMutablePointer<Float>
+    private var sourceShape: UnsafeMutablePointer<ShapeDSP>?
+    private var bufferShapes: UnsafeMutablePointer<ShapeDSP>?
+    /// Each output buffer held back so every output sounds together with the slowest.
+    private var bufferDelays: UnsafeMutablePointer<DelayLine>?
+    private let nightOn: UnsafeMutablePointer<Float>
+    private var night: UnsafeMutablePointer<Compressor>?
+    /// Each output buffer's shape, then the app's (kept alive for the audio thread).
+    private let shapeSources: [ShapeControl]
 
     /// - Parameters:
     ///   - outputs: the devices to play through (the first one is the clock), each with its
     ///     software gain (1 when the device's own volume does the job).
     ///   - gain: the tap's own level (an app's volume); `muted` is 1 when muted.
-    init(source: Source, outputs: [(uid: String, gain: SharedValue)], gain: SharedValue, muted: SharedValue) throws {
+    ///   - shape: the app's own EQ (none for everything else).
+    ///   - night: Night Mode (1: on), which evens out the tapped sound.
+    init(source: Source, outputs: [TapOutput], gain: SharedValue, muted: SharedValue, shape: ShapeControl?, night: SharedValue) throws {
         guard let clock = outputs.first?.uid else { throw HALError(status: kAudioHardwareBadDeviceError, what: "find an output") }
         self.source = source
         outputUIDs = outputs.map(\.uid)
@@ -88,7 +106,10 @@ final class TapPlayer {
         tapDescription.isPrivate = true
         tapDescription.muteBehavior = .mutedWhenTapped
 
-        gainValues = [gain, muted] + outputs.map(\.gain)
+        gainValues = [gain, muted, night] + outputs.map(\.gain)
+        nightOn = night.pointer
+        scratch = .allocate(capacity: Self.maxFrames * 2)
+        scratch.initialize(repeating: 0, count: Self.maxFrames * 2)
         tapGain = gain.pointer
         tapMuted = muted.pointer
         outputGains = .allocate(capacity: outputs.count)
@@ -103,6 +124,7 @@ final class TapPlayer {
             map += Array(repeating: index, count: streams)
         }
         bufferCount = max(map.count, 1)
+        shapeSources = (0..<bufferCount).map { index in outputs[index < map.count ? map[index] : 0].shape } + (shape.map { [$0] } ?? [])
         bufferOutput = .allocate(capacity: bufferCount)
         bufferGain = .allocate(capacity: bufferCount)
         for index in 0..<bufferCount {
@@ -141,6 +163,25 @@ final class TapPlayer {
                   format.mBitsPerChannel == 32, format.mSampleRate > 0
             else { throw HALError(status: kAudioDeviceUnsupportedFormatError, what: "use the output's format") }
             ramp = 1 - exp(-1 / (Float(format.mSampleRate) * 0.02)) // ~20 ms smoothing, no clicks
+            let dsps = UnsafeMutablePointer<ShapeDSP>.allocate(capacity: bufferCount)
+            for index in 0..<bufferCount {
+                (dsps + index).initialize(to: ShapeDSP(control: shapeSources[index], sampleRate: format.mSampleRate))
+            }
+            bufferShapes = dsps
+            let alignment = HAL.alignment(outputUIDs)
+            let delays = UnsafeMutablePointer<DelayLine>.allocate(capacity: bufferCount)
+            for index in 0..<bufferCount {
+                let output = index < map.count ? map[index] : 0
+                let frames = Int((alignment[output] * format.mSampleRate).rounded())
+                (delays + index).initialize(to: DelayLine(frames: frames, maxBlock: Self.maxFrames))
+            }
+            bufferDelays = delays
+            self.night = .allocate(capacity: 1)
+            self.night?.initialize(to: .nightMode(sampleRate: format.mSampleRate))
+            if let shape {
+                sourceShape = .allocate(capacity: 1)
+                sourceShape?.initialize(to: ShapeDSP(control: shape, sampleRate: format.mSampleRate))
+            }
         } catch {
             ramp = 0
             teardown()
@@ -235,17 +276,23 @@ final class TapPlayer {
         outputGains.deallocate()
         bufferOutput.deallocate()
         bufferGain.deallocate()
+        scratch.deallocate()
+        if let bufferShapes {
+            for index in 0..<bufferCount { bufferShapes[index].release() }
+            bufferShapes.deallocate()
+        }
+        if let bufferDelays {
+            for index in 0..<bufferCount { bufferDelays[index].release() }
+            bufferDelays.deallocate()
+        }
+        night?.deallocate()
+        if let sourceShape {
+            sourceShape.pointee.release()
+            sourceShape.deallocate()
+        }
     }
 
     // MARK: Audio thread: no allocation, locks, Objective-C or logging below.
-
-    /// Boosted apps can go past full scale; peaks are rounded off instead of clipping hard.
-    @inline(__always) private static func limit(_ sample: Float) -> Float {
-        let size = abs(sample)
-        guard size > 0.9 else { return sample }
-        let limited = 0.9 + 0.1 * tanh((size - 0.9) / 0.1)
-        return sample < 0 ? -limited : limited
-    }
 
     private func render(_ inputList: UnsafePointer<AudioBufferList>, _ outputList: UnsafeMutablePointer<AudioBufferList>) {
         let inputs = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputList))
@@ -253,22 +300,30 @@ final class TapPlayer {
         // The tap's stream comes after any input streams the output devices have.
         let tap = inputs.count > 0 ? inputs[inputs.count - 1] : AudioBuffer()
         let inChannels = max(Int(tap.mNumberChannels), 1)
-        let inFrames = tap.mData == nil ? 0 : Int(tap.mDataByteSize) / (MemoryLayout<Float>.size * inChannels)
+        let inFrames = tap.mData == nil ? 0 : min(Int(tap.mDataByteSize) / (MemoryLayout<Float>.size * inChannels), Self.maxFrames)
         let source = tap.mData?.assumingMemoryBound(to: Float.self)
         let level = tapMuted.pointee > 0.5 ? 0 : tapGain.pointee
         let ramp = self.ramp
 
+        // A stereo copy of the tap, with the app's own EQ.
         if let source {
             var peak: Float = 0
             for sample in 0..<(inFrames * inChannels) { peak = max(peak, abs(source[sample])) }
             if peak > Float(bitPattern: peakBits.load(ordering: .relaxed)) { peakBits.store(peak.bitPattern, ordering: .relaxed) }
+            for frame in 0..<inFrames {
+                let left = source[frame * inChannels]
+                scratch[frame * 2] = left
+                scratch[frame * 2 + 1] = inChannels > 1 ? source[frame * inChannels + 1] : left
+            }
+            sourceShape?.pointee.process(scratch, frames: inFrames, channels: 2)
+            night?.pointee.process(scratch, frames: inFrames, channels: 2, on: nightOn.pointee > 0.5)
         }
 
         for index in 0..<outputs.count {
             let buffer = outputs[index]
             guard let data = buffer.mData else { continue }
             memset(data, 0, Int(buffer.mDataByteSize))
-            guard index < bufferCount, let source else { continue }
+            guard index < bufferCount, source != nil else { continue }
             let channels = max(Int(buffer.mNumberChannels), 1)
             let frames = min(inFrames, Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * channels))
             let target = level * outputGains[bufferOutput[index]].pointee
@@ -276,16 +331,22 @@ final class TapPlayer {
             var gain = bufferGain[index]
             for frame in 0..<frames {
                 gain += (target - gain) * ramp
-                let left = source[frame * inChannels]
-                let right = inChannels > 1 ? source[frame * inChannels + 1] : left
+                let left = scratch[frame * 2], right = scratch[frame * 2 + 1]
                 if channels == 1 {
-                    out[frame] = Self.limit((left + right) * 0.5 * gain)
+                    out[frame] = (left + right) * 0.5 * gain
                 } else {
-                    out[frame * channels] = Self.limit(left * gain)
-                    out[frame * channels + 1] = Self.limit(right * gain)
+                    out[frame * channels] = left * gain
+                    out[frame * channels + 1] = right * gain
                 }
             }
             bufferGain[index] = gain
+            // The output's own shape, then peaks rounded off (Boost and EQ can go past full scale).
+            bufferShapes?[index].process(out, frames: frames, channels: channels)
+            for frame in 0..<frames {
+                out[frame * channels] = softLimit(out[frame * channels])
+                if channels > 1 { out[frame * channels + 1] = softLimit(out[frame * channels + 1]) }
+            }
+            bufferDelays?[index].process(out, frames: frames, channels: channels)
         }
     }
 }

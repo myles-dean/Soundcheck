@@ -469,6 +469,9 @@ final class AirPlayEventChannel: @unchecked Sendable {
     private let link: AirPlayTCPLink
     private let hap: HAPSession
     private var buffer = Data()
+    /// The speaker's own volume changed (0...1): its buttons, Siri, an iPhone or the Home app.
+    /// Called on the channel's queue.
+    var onVolume: (@Sendable (Float) -> Void)?
 
     private init(link: AirPlayTCPLink, outputKey: Data, inputKey: Data) {
         self.link = link
@@ -499,11 +502,28 @@ final class AirPlayEventChannel: @unchecked Sendable {
 
     func close() { link.close() }
 
+    /// A volume change reported by the speaker: a "dvlc" event with "volume" (0...1) at the top
+    /// level or in "params", the way OwnTone reads them from HomePods.
+    static func reportedVolume(_ plist: [String: Any]) -> Float? {
+        let params = plist["params"] as? [String: Any]
+        guard (plist["value"] as? String ?? params?["value"] as? String) == "dvlc",
+              let number = (plist["volume"] ?? params?["volume"]) as? NSNumber else { return nil }
+        let volume = number.floatValue
+        return (0...1).contains(volume) ? volume : nil
+    }
+
     private func received(_ data: Data) {
         do {
             buffer.append(try hap.decrypt(data))
             while let request = try AirPlayHTTPMessage.parse(&buffer) {
                 AirPlayLog.debug("Event from speaker: \(request.firstLine)")
+                if let plist = request.plist {
+                    let params = plist["params"] as? [String: Any]
+                    let type = plist["type"] as? String ?? "-"
+                    let value = plist["value"] as? String ?? params?["value"] as? String ?? "-"
+                    AirPlayLog.logger.notice("Speaker event: type \(type, privacy: .public), value \(value, privacy: .public), keys \(plist.keys.sorted().joined(separator: ","), privacy: .public)")
+                    if let volume = Self.reportedVolume(plist) { onVolume?(volume) }
+                }
                 // Reply with the request's protocol ("RTSP/1.0"), like pyatv.
                 let proto = request.firstLine.split(separator: " ").last.map(String.init) ?? "RTSP/1.0"
                 var headers: [(String, String)] = [("Content-Length", "0"), ("Audio-Latency", "0")]

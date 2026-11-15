@@ -127,6 +127,8 @@ private struct SetupEditor: View {
                 }
             }
 
+            automaticSection
+
             Section {
                 ForEach(engine.knownSpeakers) { device in
                     speakerRow(device)
@@ -184,6 +186,68 @@ private struct SetupEditor: View {
         }
         .formStyle(.grouped)
         .animation(.easeInOut(duration: 0.2), value: applied)
+    }
+
+    // MARK: Automatically
+
+    private enum TriggerChoice: Hashable { case never, device, app }
+
+    /// Speakers and mics Soundcheck has seen (not AirPlay speakers, which don't "connect").
+    private var triggerDevices: [AudioEngine.KnownDevice] {
+        var seen: Set<String> = []
+        return (engine.knownSpeakers + engine.knownMicrophones).filter { !$0.id.hasPrefix("airplay:") && seen.insert($0.id).inserted }
+    }
+
+    private var automaticSection: some View {
+        let choice = Binding<TriggerChoice>(
+            get: {
+                switch setup.trigger?.kind {
+                case .deviceConnects: .device
+                case .appOpens: .app
+                case nil: .never
+                }
+            },
+            set: { choice in
+                switch choice {
+                case .never: setup.trigger = nil
+                case .device: setup.trigger = .init(kind: .deviceConnects, id: triggerDevices.first?.id ?? "")
+                case .app: setup.trigger = .init(kind: .appOpens, id: "")
+                }
+            })
+        return Section {
+            Picker("Apply automatically", selection: choice) {
+                Text("Never").tag(TriggerChoice.never)
+                Text("When a speaker or mic connects").tag(TriggerChoice.device)
+                Text("When an app opens").tag(TriggerChoice.app)
+            }
+            if setup.trigger?.kind == .deviceConnects {
+                Picker("Device", selection: Binding(get: { setup.trigger?.id ?? "" },
+                                                    set: { setup.trigger = .init(kind: .deviceConnects, id: $0) })) {
+                    ForEach(triggerDevices) { device in
+                        Label(device.name, systemImage: device.symbol).tag(device.id)
+                    }
+                }
+            }
+            if setup.trigger?.kind == .appOpens {
+                HStack {
+                    Text("App")
+                    Spacer()
+                    if let id = setup.trigger?.id, !id.isEmpty {
+                        Image(nsImage: AppLookup.icon(id)).resizable().frame(width: 18, height: 18)
+                        Text(AppLookup.name(id)).foregroundStyle(.secondary)
+                    }
+                    Button("Choose App…") {
+                        AppLookup.choose(title: "Apply This Setup When an App Opens", prompt: "Choose") { ids in
+                            if let id = ids.first { setup.trigger = .init(kind: .appOpens, id: id) }
+                        }
+                    }
+                }
+            }
+        } header: {
+            Text("Automatically")
+        } footer: {
+            Text("The setup puts itself in place when this happens, and the volume pill says so.")
+        }
     }
 
     // MARK: Rows

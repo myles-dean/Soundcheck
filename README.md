@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>The Sound menu your Mac should have had.</b><br>
-  Every speaker, app and microphone on your Mac, from one speaker in the menu bar: a volume for each app,
-  several speakers at once, AirPlay to HomePods in sync, and a microphone that mixes.<br>
+  Every speaker, app and microphone on your Mac, from one speaker in the menu bar: a volume and an EQ
+  for each app, several speakers at once, AirPlay to HomePods in sync, and a microphone that mixes.<br>
   Free and open source, made for macOS 26 Tahoe.
 </p>
 
@@ -32,11 +32,14 @@
 speaker at a time, has one volume for everything, and leaves your microphone in System Settings.
 Soundcheck puts all of it in one Liquid Glass panel that looks and moves like Control Center:
 
-- **Speakers.** Play through as many speakers as you like at once, each at its own volume.
-- **Apps.** A volume for every app that's making sound, with mute, boost and its own speakers.
+- **Speakers.** Play through as many speakers as you like at once, each at its own volume, with its
+  own EQ, balance and mono.
+- **Apps.** A volume for every app that's making sound, with mute, boost, an EQ and its own speakers.
 - **AirPlay.** Stream to HomePods and other AirPlay speakers, in sync with your Mac's own speakers.
 - **Mics.** One virtual microphone, *Soundcheck Mic*, that every app uses. Pick the real mic once, in
-  Soundcheck, or mix several mics and apps into it.
+  Soundcheck, or mix several mics and apps into it, give each mic an EQ, and hear yourself in your
+  headphones.
+- **Shortcuts and Siri.** Switch speakers, set an app's volume or apply a saved setup from a shortcut.
 - **The volume keys.** Your keyboard's volume keys move whichever group you pick (speakers, apps or
   mics), with an Apple-style volume pill.
 
@@ -63,8 +66,12 @@ in one free app:
   speaker (or app, or mic) by the same amount, the volume keys can go past full until everything is at
   full, and nothing forgets its level when you unplug it. macOS's own Multi-Output Device plays through
   several speakers, but the volume keys and menu bar slider don't work with it.
-- **Made for calls.** Quiet Apps in Calls lowers or mutes everything else while an app uses the mic,
-  Mute Mics has its own shortcut, and you can see which apps are listening.
+- **An EQ wherever there's a volume bar.** Fill out a display's thin speakers, take the boom out of a
+  MacBook's, bring a podcast's voices forward or warm up your mic: every speaker, app and mic has its
+  own five-band EQ, named for what each band does rather than its frequency.
+- **Made for calls and streams.** Quiet Apps in Calls lowers or mutes everything else while an app
+  uses the mic, Mute Mics has its own shortcut, you can see which apps are listening, and Hear
+  Yourself plays your mic in your headphones.
 - **Feels like part of macOS.** A Liquid Glass panel that opens like Control Center's menus, a volume
   pill styled like Apple's, and a speaker icon that only shows up when there's something to control.
 - **No driver for app volumes.** Per-app volume, extra speakers and AirPlay use macOS's own process
@@ -85,15 +92,16 @@ in one free app:
 | Lower or mute apps during calls | ✓ | — | — | — ² |
 | Saved setups | ✓ | ✓ | — ³ | — |
 | Installs a system audio add-on for app volumes | No | Yes | No | Yes |
-| EQ and audio effects | — | ✓ | ✓ | — |
+| EQ | ✓ | ✓ | ✓ | — |
+| Audio effects (reverb, compressors, plug-ins) | — | ✓ | — | — |
 
 — means the app doesn't offer it, as far as its own site and docs say (checked November 2026).
 ¹ Rogue Amoeba sells this separately as Loopback ($99).
 ² Background Music can pause your music player when other audio plays.
 ³ FineTune has EQ presets and remembers settings per device.
 
-Soundcheck doesn't have an EQ or audio effects yet. If that's what you're after, SoundSource,
-FineTune and [eqMac](https://eqmac.app) all have one.
+Soundcheck's EQ is a five-band one for every speaker, app and mic. It doesn't host audio effects or
+plug-ins; SoundSource does.
 
 ## Features
 
@@ -113,12 +121,33 @@ at full. The gaps between them are remembered.
 - **Several at once is the default.** Open the Speakers list. Click a speaker to play only through
   it, or click its circle to add it alongside the others: your MacBook's speakers, a display, USB
   speakers, headphones, AirPlay speakers, all at once.
-- **Mix** gives every speaker its own volume bar. It opens by itself when your speakers are at
-  different volumes. Close it and they all even out at the loudest one.
+- **Mix** puts a volume bar under each speaker in use, right in the Speakers list. It turns on by
+  itself when your speakers are at different volumes. Turn it off and they all even out at the
+  loudest one.
+- **Mute one speaker.** The speaker icon at the end of its bar shows how loud it is (no waves at
+  zero, up to three); click it to mute just that speaker. It stays muted while you turn everything
+  else up, until you click it again.
 - **Displays and devices without a volume** (most HDMI and DisplayPort monitors) get a real volume
   anyway, and their volume keys work.
 - **Switch to Headphones.** Plug in headphones and everything moves to them, with a pill to say so.
 - **Every speaker remembers its volume**, across unplugging, restarting and relaunching.
+- **Every speaker in sync.** Bluetooth headphones, HDMI displays and USB speakers each take a
+  different time to play what they're given. Soundcheck holds the quicker ones back by the
+  difference each device reports, so ten speakers of different kinds play as one, AirPlay included.
+- **Night Mode** (in Options) evens out loud and quiet parts for late-night films.
+- **EQ, balance and mono.** The button to the left of a speaker's bar (the main bar when one speaker
+  is playing, or its own bar with Mix on) opens its EQ: **Bass**, **Warmth**, **Voice**, **Clarity** and
+  **Air**, each ±12 dB, with starting points like *More Bass*, *Less Boom* and *Clear Voices*. Below it
+  are **Balance** and **Mono** (for one earbud, or a speaker in a corner). Double-click a band to set it
+  flat again.
+- **A volume limit for headphones.** Set the loudest a pair of headphones can go. The slider and the
+  volume keys stop there, and so does anything else that tries to turn them up.
+- **Hear Yourself.** Click the headphones button next to a speaker's EQ button (with Soundcheck Mic
+  added) to hear Soundcheck Mic on that speaker, with its EQ, for streaming and podcasting.
+  **Right-click** it to pick exactly which mics that speaker plays: the guest's mic only in the
+  guest's headphones, both in yours, or a mic that isn't going into Soundcheck Mic at all, just for
+  your ears. Turn it on for your headphones and it's on whenever they're in use. How loud you hear
+  yourself is set in the Microphone section.
 
 ### AirPlay
 
@@ -133,18 +162,34 @@ icons and names, like Apple's own picker. Its icon shows how many are playing.
   speakers back by exactly as long as AirPlay takes. There's no delay slider to fiddle with.
 - **HomePods connect with no code.** An Apple TV shows a code on screen the first time; type it into
   the AirPlay list and it's remembered (in your Keychain).
+- **The volume goes both ways.** Turn a HomePod up on the speaker itself, with Siri or from your
+  iPhone, and its bar in Soundcheck follows.
+- **EQ, balance and mono** work on AirPlay speakers too, so a HomePod mini can get a little more bass.
 
 ### Apps
 
 - **A volume for every app that's making sound.** The Apps list shows their icons stacked, with a
   "+3"-style count for the rest. Open it for a bar per app.
-- **Click an app's icon to mute it.** If a muted app starts playing later, a pill tells you it's muted,
+- **Click an app's icon, or the speaker at the end of its bar, to mute it.** The speaker shows how
+  loud the app is, like the speakers' bars. If a muted app starts playing later, a pill tells you it's muted,
   once, so you're never left wondering why something's silent.
 - **Boost Apps** lets a quiet app go up to 200%, past a tick at 100%, with a limiter so it doesn't
   crackle.
 - **Split** sends an app to its own speakers: music on your desk speakers while a call stays on your
-  headphones.
+  headphones. AirPlay speakers that are on are in the list too, so a podcast can play on just the
+  kitchen HomePod while everything else stays on the Mac.
+- **An EQ for each app.** The button beside an app's bar opens its EQ, so you can add bass to your
+  music without making a call boomy.
 - **Pinned Apps** always have a bar, even when they're quiet.
+- **Browser tabs, one by one.** With Soundcheck's extension in Safari, Dia or Chrome, a browser's
+  name in the Apps list opens to its tabs that are playing or on a call, each with its favicon, its
+  own volume and mute (on top of the browser's). When a tab joins a call (Meet, Zoom, Teams,
+  Discord…), Quiet Apps in Calls lowers or mutes the browser's other tabs as well as the other apps.
+  Set it up in **Options › Soundcheck › Browser Tabs**.
+- **System** is always at the end of the list: macOS's own sounds (alerts like the "can't do that"
+  bonk, notification sounds, the charging chime, Control Center's volume click and ringtones) as one
+  app, with its own volume, mute, EQ and speakers. Route it into Soundcheck Mic too, if you want your
+  call or stream to hear your notifications.
 - **Every app remembers its volume.** App bars move on their own, unless you pick **Apps** at the top,
   where the main bar and the volume keys move them all together.
 
@@ -155,12 +200,21 @@ running it's your Mac's microphone, and it carries whichever real mic you pick i
 means Zoom, FaceTime, Discord, OBS and your browser never need their microphone setting changed again:
 you change it once, in the menu bar, and every app follows.
 
-- **Route** mixes into Soundcheck Mic. Tick as many mics as you like, each with its own level, and add
-  apps too (each with its own level), so the people on your call hear your music, a soundboard or a
+- **Route** mixes into Soundcheck Mic. Tick as many mics as you like, each with its own level and
+  mute, and add apps too (each with its own level and mute, which only applies inside Soundcheck Mic), so the people on your call hear your music, a soundboard or a
   game along with you.
 - **Live level meters** run inside every mic slider, a lighter shade of the bar that follows how loud
   you are. They're sized to the slider, so a mic turned all the way down shows nothing.
-- **A mic at zero is muted**, really muted, in the hardware and in the mix.
+- **A mic at zero is muted**, really muted, in the hardware and in the mix. Or click the mic at
+  the end of its bar to mute it without losing its level.
+- **An EQ for each mic**, inside Soundcheck Mic: *Less Rumble* for a desk mic, *Clear Voices* for a
+  laptop's. Every app hears the result.
+- **Hear Yourself** plays your mic in your headphones: turn it on with the headphones button next to
+  their EQ, and set how loud under the mic.
+- **Voice Cleanup** (in Options) cuts rumble, quiets the room between your words and evens out your
+  level, for everyone who hears Soundcheck Mic.
+- **Lower Apps When You Talk** (in Options) dips the music you've routed into Soundcheck Mic while
+  you speak, then brings it back, like a radio host.
 - **Mute Mics** has a keyboard shortcut you choose, and a pill shows **Mics Muted** or **Mics On**.
 - **See who's listening.** An orange dot and the apps' icons show which apps are using the mic right
   now.
@@ -168,33 +222,68 @@ you change it once, in the menu bar, and every app follows.
 
 ### Options
 
-The **•••** menu in the panel:
+The **•••** menu in the panel has three sections, opening one at a time, then Reset and Quit:
+
+**Speakers & Apps**
+
+| Option | What it does |
+| --- | --- |
+| Switch to Headphones | Moves all sound to headphones when they're plugged in (on by default) |
+| Night Mode | Evens out loud and quiet parts, so explosions don't wake anyone and dialogue stays clear |
+| Quiet Apps in Calls | While a call rings (FaceTime, or your iPhone through Continuity) or an app is using the mic, lowers every other app, or mutes them, and fades them back after. While it's on, Soundcheck carries the sound whenever something plays, so a call only has to turn things down |
+| Boost Apps | Lets app volumes go past 100%, up to 200% |
+| Pinned Apps | Apps that always show in the Apps list, chosen from what's playing or with Finder |
+
+**Microphones**
+
+| Option | What it does |
+| --- | --- |
+| Voice Cleanup | In Soundcheck Mic: cuts rumble, quiets the room between your words (it learns how noisy the room is) and evens out your level |
+| Lower Apps When You Talk | Apps routed into Soundcheck Mic dip while you talk, so you're heard over the music; they don't change on your speakers |
+| Mute Mics | Mutes every mic, with a keyboard shortcut you set |
+
+**Soundcheck**
 
 | Option | What it does |
 | --- | --- |
 | Open at Login | Starts Soundcheck when you log in |
 | Keep in Menu Bar | Shows the speaker icon all the time, not only while something plays or listens |
-| Switch to Headphones | Moves all sound to headphones when they're plugged in (on by default) |
-| Quiet Apps in Calls | While an app is using the mic, lowers every other app, or mutes them |
-| Boost Apps | Lets app volumes go past 100%, up to 200% |
-| Mute Mics | Mutes every mic, with a keyboard shortcut you set |
-| Pinned Apps | Apps that always show in the Apps list, chosen from what's playing or with Finder |
 | Saved Setups ↗ | Opens the Saved Setups window; your setups are listed below it with Apply buttons |
-| Reset | Evens out the speakers, puts every app back to full and unmuted, and turns Split and Route off |
+| Browser Tabs ↗ | Turns on Soundcheck's Safari extension, and adds it to Dia, Chrome and other Chrome-based browsers |
+| Check for Updates… | Looks for a newer Soundcheck now (it also checks once a day) |
 | Sound Settings… | Opens macOS's Sound settings |
+
+**Reset** evens out the speakers, puts every app back to full and unmuted, sets every EQ, balance and
+mono flat, unmutes anything muted on its own, and turns Split, Route and Hear Yourself off. For 5
+seconds after, it's **Undo Reset**.
 
 ### Saved Setups
 
 A setup is a layout you can apply in one click: which speakers play and how loud, each app's volume,
 mute and speakers, and what goes into Soundcheck Mic. Make one from how things are right now and
-edit it in the Saved Setups window. *Work* might be headphones, Slack quiet and your USB mic; *Movie*
+edit it in the Saved Setups window. A setup can also **apply itself** when a speaker or mic connects
+(your dock, your headphones) or when an app opens (Zoom, OBS), and the volume pill says so. *Work* might be headphones, Slack quiet and your USB mic; *Movie*
 might be the TV's speakers plus the HomePods, everything else muted.
+
+### Shortcuts and Siri
+
+Soundcheck adds three actions to the Shortcuts app, so a shortcut, an automation or Siri can drive it:
+
+| Action | What it does |
+| --- | --- |
+| Switch Speakers | Plays through the speakers you choose, AirPlay speakers included |
+| Set App Volume | Sets one app's volume (up to 200% with Boost Apps on) |
+| Apply Setup | Puts one of your saved setups in place |
+
+Say "Apply *Movie* in Soundcheck" to Siri, or run a setup when you join a Wi-Fi network or a Focus
+starts.
 
 ### The volume pill
 
 With Soundcheck allowed to use the volume keys, pressing them shows Soundcheck's own pill instead of
 Apple's, styled like it, for the group you're changing. Volume knobs on Windows-style keyboards work
-too. The menu bar icon's waves fill with the volume, and it animates the way Apple's does when you
+too. Anything muted (the Mac, one speaker, an app or a mic) says **Muted** and keeps its level,
+dimmed, so muted never looks the same as turned all the way down. The menu bar icon's waves fill with the volume, and it animates the way Apple's does when you
 mute.
 
 ## Install
@@ -205,6 +294,9 @@ mute.
    and hiding Apple's Sound icon.
 3. Hide Apple's Sound icon so there's only one: **System Settings › Menu Bar**, set **Sound** to
    **Don't Show**.
+
+Soundcheck checks for updates once a day and asks before installing one (or choose
+**Options › Check for Updates…**).
 
 Or install it with [Homebrew](https://brew.sh):
 
@@ -224,7 +316,7 @@ walkthrough lists them all):
 | Permission | What it's for |
 | --- | --- |
 | Accessibility | Taking over the volume keys and showing Soundcheck's volume pill |
-| System Audio Recording | App volumes, several speakers, AirPlay and routing apps into Soundcheck Mic |
+| System Audio Recording | App volumes, EQ, several speakers, AirPlay and routing apps into Soundcheck Mic |
 | Microphone | Carrying your real mic into Soundcheck Mic |
 | Local Network | Finding AirPlay speakers and streaming to them |
 
@@ -238,11 +330,13 @@ That's macOS's privacy indicator for "system audio recording". It shows whenever
 other apps' sound, which is how Soundcheck changes an app's volume, plays through several speakers,
 streams to AirPlay and routes apps into Soundcheck Mic. Nothing is recorded or saved. Apple sets the
 icon and its colour, and no app can hide it. When Soundcheck isn't changing anything (one speaker,
-every app at full, no AirPlay or Route), it lets go and the icon goes away.
+every app at full, no EQ, Night Mode, AirPlay, Route or Quiet Apps in Calls), it lets go and the icon
+goes away.
 
 **Does Soundcheck record anything or send anything anywhere?**
 No. Sound passes through it to your speakers and to Soundcheck Mic, and nothing is written to disk.
-The only network traffic is to AirPlay speakers you pick.
+The only network traffic is to AirPlay speakers you pick, and a daily look at GitHub for a newer
+version of Soundcheck (nothing about you or your Mac is sent).
 
 **Which AirPlay speakers work?**
 HomePods are tested and connect with no code. Apple TVs pair with the code they show on screen the
@@ -251,6 +345,11 @@ won't connect, please [open an issue](https://github.com/myles-dean/Soundcheck/i
 
 **What happens to my microphone if I quit Soundcheck?**
 Your real mic becomes the Mac's microphone again, and every app gets its own sound back.
+
+**And if Soundcheck crashes?**
+Soundcheck Mic is silent without Soundcheck, so a small watchdog that runs beside it gives your real
+mic back straight away, and opens Soundcheck again (which picks Soundcheck Mic back up). If you
+force quit it, your mic comes back and Soundcheck stays closed.
 
 **How do I remove Soundcheck Mic?**
 `brew uninstall --zap --cask soundcheck` removes it. Without Homebrew, quit Soundcheck and run:
@@ -271,8 +370,12 @@ You need Xcode 26 or later and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 ```bash
 ./build.sh            # build into ./build
 ./build.sh install    # build, install to /Applications and launch
-./build.sh release    # Developer ID build packaged as build/Soundcheck.dmg
+./build.sh release    # Developer ID build packaged as build/Soundcheck.dmg, plus build/appcast.xml
 ```
+
+A release attaches both `Soundcheck.dmg` and `appcast.xml` to its GitHub release; the app's update
+feed is the latest release's `appcast.xml`. The appcast is signed with the update key in the
+maintainer's Keychain (Sparkle's `generate_keys --account Soundcheck`).
 
 How it fits together:
 
@@ -282,6 +385,11 @@ How it fits together:
 - `App/AirPlay`: the AirPlay 2 sender (discovery, HomeKit pairing, encryption, the RTP stream and PTP
   timing).
 - `App/UI`: the menu bar panel, volume pill, walkthrough and Saved Setups window.
+- `App/Intents`: the Shortcuts actions.
+- `App/Watchdog.swift`: gives the real mic back (and reopens Soundcheck) if Soundcheck crashes.
+- `Extension`: the browser extension (one set of scripts; a manifest for Chrome-based browsers and
+  one for Safari, whose extension is built into the app), and `App/Browser`, the app's side of it
+  (Chrome-based browsers start Soundcheck's own executable as their native messaging helper).
 - `Driver`: Soundcheck Mic, a Core Audio driver (AudioServerPlugIn) with a visible microphone and a
   hidden output that Soundcheck feeds.
 
@@ -290,7 +398,8 @@ How it fits together:
 The AirPlay sender is a Swift port of [pyatv](https://github.com/postlund/pyatv) by Pierre Ståhl,
 with PTP timing from OwnTone's [libairptp](https://github.com/owntone/libairptp) and
 [tuxplay](https://github.com/ksha23/tuxplay). Their licenses are in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The EQ's filters follow Robert Bristow-Johnson's
+Audio EQ Cookbook.
 
 ## License
 

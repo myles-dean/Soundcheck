@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Soundcheck",
+  "description": "Gives each tab its own volume in Soundcheck, and lowers the other tabs and apps while a tab is on a call.",
+  "version": "1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt2u0Ysy8e8duthBcnT+TJVrl+m98oQVJbaoTOpu4G7m0KujQzzaJJkiEFBgHdvPcr+F2Xm1w+9dYR0QvsVlsSjkrULnNwbgGTnzmqgdLpRGl7jOx29PoApvIDiUFxplyNcjEFX8Ad5n4IAkmtmdyX6JPtG2mMlA/Zd/6omIvbd87wl8RJqWoh9VWS7ejtOWGbhQKFn2a4h+EoWbn5bf2J+7bu3TOleBt//C/PUbf3tFNfYITzU55MhZ1809hFdEXNdzfu44+GNz+voqrzTpcV0q0L7TosogAaSnKjAq7H/QWjEgHqunhAk/Tf0KhgVpWXmPZsHL1EGsUctk+vmsnCQIDAQAB",
+  "icons": { "48": "icon-48.png", "96": "icon-96.png", "128": "icon-128.png" },
+  "permissions": ["tabs", "nativeMessaging", "favicon"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["page.js"], "run_at": "document_start", "all_frames": true, "match_about_blank": true, "world": "MAIN" },
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_start", "all_frames": true, "match_about_blank": true }
+  ]
+}

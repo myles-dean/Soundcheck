@@ -3,7 +3,11 @@
 #   ./build.sh           build only, into ./build
 #   ./build.sh install   build, install to /Applications and (re)launch, leaving no other copy behind
 #   ./build.sh release   Developer ID build (hardened runtime) packaged as build/Soundcheck.dmg;
-#                        with NOTARY_PROFILE=<notarytool keychain profile> it's notarized and stapled
+#                        with NOTARY_PROFILE=<notarytool keychain profile> it's notarized and stapled.
+#                        Also writes build/appcast.xml (the update feed): attach it to the GitHub
+#                        release along with the DMG; and build/Soundcheck-Chrome-Extension-<v>.zip,
+#                        the browser extension for the Chrome Web Store. Signing it uses the update key in the login
+#                        Keychain (account "Soundcheck"); macOS may ask to allow that.
 # Needs Xcode 26+ and xcodegen (brew install xcodegen).
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -30,6 +34,19 @@ echo "→ Building"
 xcodebuild -project "$NAME.xcodeproj" -scheme "$NAME" -configuration Release \
     -derivedDataPath "$DERIVED" -destination "platform=macOS" -quiet \
     ${SIGNING[@]+"${SIGNING[@]}"} build
+if [[ "$MODE" == "release" ]]; then
+    # Sparkle's helpers come ad-hoc signed, which notarization refuses: sign them (inside out) as
+    # Sparkle's documentation describes, then the app again around them.
+    SPARKLE="$PRODUCTS/$NAME.app/Contents/Frameworks/Sparkle.framework"
+    sign() { codesign --force --sign "Developer ID Application" --options runtime --timestamp "$@"; }
+    sign "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
+    sign --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
+    sign "$SPARKLE/Versions/B/Autoupdate"
+    sign "$SPARKLE/Versions/B/Updater.app"
+    sign "$SPARKLE"
+    sign --preserve-metadata=entitlements "$PRODUCTS/$NAME.app"
+fi
+
 if [[ "$MODE" != "install" ]]; then
     rm -rf "$APP"
     ditto "$PRODUCTS/$NAME.app" "$APP"
@@ -65,6 +82,46 @@ if [[ "$MODE" == "release" ]]; then
         echo "  Not notarized. Run with NOTARY_PROFILE=<profile> to notarize."
     fi
     echo "✓ $DMG"
+
+    echo "→ Update feed"
+    TOOLS="$DERIVED/SourcePackages/artifacts/sparkle/Sparkle/bin"
+    VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")
+    BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist")
+    # sparkle:edSignature="…" length="…", for the DMG exactly as it'll be uploaded (after stapling).
+    SIGNATURE=$("$TOOLS/sign_update" --account Soundcheck "$DMG")
+    cat > "$BUILD/appcast.xml" <<XML
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Soundcheck</title>
+    <link>https://github.com/myles-dean/Soundcheck</link>
+    <item>
+      <title>Soundcheck $VERSION</title>
+      <pubDate>$(LC_ALL=C date -u "+%a, %d %b %Y %H:%M:%S +0000")</pubDate>
+      <sparkle:version>$BUILD_NUMBER</sparkle:version>
+      <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <sparkle:fullReleaseNotesLink>https://github.com/myles-dean/Soundcheck/releases/tag/v$VERSION</sparkle:fullReleaseNotesLink>
+      <enclosure url="https://github.com/myles-dean/Soundcheck/releases/download/v$VERSION/Soundcheck.dmg" type="application/octet-stream" $SIGNATURE/>
+    </item>
+  </channel>
+</rss>
+XML
+    echo "✓ $BUILD/appcast.xml (attach it to the v$VERSION release with the DMG)"
+
+    echo "→ Chrome Web Store package"
+    # The extension as the store takes it: without the "key" that fixes the ID for Load unpacked
+    # (the store gives it its own ID).
+    STAGE="$BUILD/chrome-extension"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    cp Extension/Shared/* "$STAGE/"
+    EXTENSION_VERSION=$(/usr/bin/python3 -c 'import json,sys; m=json.load(open("Extension/Chromium/manifest.json")); m.pop("key",None); json.dump(m, open(sys.argv[1],"w"), indent=2); print(m["version"])' "$STAGE/manifest.json")
+    ZIP="$BUILD/Soundcheck-Chrome-Extension-$EXTENSION_VERSION.zip"
+    rm -f "$ZIP"
+    (cd "$STAGE" && zip -q -r -X "$ZIP" .)
+    rm -rf "$STAGE"
+    echo "✓ $ZIP (upload it in the Chrome Web Store Developer Dashboard when the extension changes)"
 fi
 
 if [[ "$MODE" == "install" ]]; then

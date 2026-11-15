@@ -83,6 +83,10 @@ final class AirPlaySession: @unchecked Sendable {
     private var sentVolume: Float?
     private var volumeInFlight = false
     private var canSetVolume = false
+    /// When a volume was last sent: for a moment after, the speaker can still report the levels
+    /// it passed through on its way there.
+    private var lastVolumeSent = Date.distantPast
+    private var speakerVolumeHandler: (@Sendable (Float) -> Void)?
 
     // PTP
     private var timingMode = Timing.ntp
@@ -101,6 +105,28 @@ final class AirPlaySession: @unchecked Sendable {
 
     deinit {
         running.store(false, ordering: .relaxed)
+    }
+
+    /// The speaker's own volume changed (0...1), from its buttons, Siri, an iPhone or the Home
+    /// app. Called on the session's queue.
+    var onSpeakerVolume: (@Sendable (Float) -> Void)? {
+        get { lock.withLock { speakerVolumeHandler } }
+        set { lock.withLock { speakerVolumeHandler = newValue } }
+    }
+
+    /// A volume the speaker reported: unless it's Soundcheck's own change coming back, it's the
+    /// speaker's level now (so it isn't sent back to it).
+    private func speakerReportedVolume(_ reported: Float) {
+        let handler = lock.withLock { () -> (@Sendable (Float) -> Void)? in
+            guard Date().timeIntervalSince(lastVolumeSent) > 1, abs((sentVolume ?? -1) - reported) > 0.005 else { return nil }
+            volume = reported
+            sentVolume = reported
+            return speakerVolumeHandler
+        }
+        if let handler {
+            AirPlayLog.logger.notice("\(self.speaker.name, privacy: .public) changed its volume to \(reported, privacy: .public)")
+            handler(reported)
+        }
     }
 
     /// Called on the main queue if the stream fails after `start` succeeded (the speaker went
@@ -419,6 +445,7 @@ final class AirPlaySession: @unchecked Sendable {
                                                inputInfo: "Events-Write-Encryption-Key")
             let events = try await AirPlayEventChannel.connect(host: rtsp.remoteHost, port: eventPort,
                                                                outputKey: keys.output, inputKey: keys.input, queue: queue)
+            events.onVolume = { [weak self] volume in self?.speakerReportedVolume(volume) }
             try keep({ $0.events = events }, orClose: { events.close() })
         } else {
             AirPlayLog.debug("No event port in the SETUP reply; going on without the event channel")
@@ -573,6 +600,7 @@ final class AirPlaySession: @unchecked Sendable {
                                                     inputInfo: "Events-Write-Encryption-Key")
             let events = try await AirPlayEventChannel.connect(host: rtsp.remoteHost, port: eventPort,
                                                                outputKey: eventKeys.output, inputKey: eventKeys.input, queue: queue)
+            events.onVolume = { [weak self] volume in self?.speakerReportedVolume(volume) }
             try keep({ $0.events = events }, orClose: { events.close() })
         }
 
@@ -890,8 +918,9 @@ final class AirPlaySession: @unchecked Sendable {
     private func sendVolume(_ rtsp: AirPlayRTSPConnection) async -> Bool {
         while true {
             let next = lock.withLock { () -> Float? in
-                guard !volumeInFlight, let volume, volume != sentVolume else { return nil }
+                guard !volumeInFlight, let volume, abs(volume - (sentVolume ?? -1)) > 0.0005 else { return nil }
                 volumeInFlight = true
+                lastVolumeSent = Date()
                 return volume
             }
             guard let next else { return true }

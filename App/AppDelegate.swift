@@ -1,3 +1,4 @@
+import AppIntents
 import AppKit
 import ServiceManagement
 
@@ -5,6 +6,10 @@ import ServiceManagement
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static func main() {
+        // The crash watchdog is this same executable, started by Soundcheck with --watchdog.
+        if CommandLine.arguments.contains(Watchdog.argument) { Watchdog.run() }
+        // A Chrome-based browser starting Soundcheck as its extension's native messaging helper.
+        if BrowserHelper.isLaunch(CommandLine.arguments) { BrowserHelper.run() }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -20,8 +25,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var termSignal: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Watchdog.start()
         NSApp.mainMenu = makeMainMenu()
         engine.start()
+        SoundcheckShortcuts.updateAppShortcutParameters()
+        Updater.shared.start()
+        BrowserTabs.shared.onCallsChanged = { AudioEngine.shared.browserCallsChanged() }
+        BrowserTabs.shared.start()
 
         statusItem = StatusItemController()
         panel = PanelController()
@@ -49,6 +59,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         engine.onNotice = { [weak self] notice in self?.showNotice(notice) }
         engine.onHeadphones = { [weak self] in self?.showLevels() }
         SetupsWindowController.shared.onOpen = { [weak self] in self?.panel.hide() }
+        BrowserSetupWindowController.shared.onOpen = { [weak self] in self?.panel.hide() }
         handleTermSignal()
 
         // The first time, start at login (it replaces the Sound menu) and show the panel. After
@@ -123,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func quit() {
         guard !isQuitting else { return }
         isQuitting = true
+        Watchdog.quitting()
         engine.shutdown()
     }
 

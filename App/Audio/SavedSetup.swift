@@ -1,3 +1,4 @@
+import AppIntents
 import Foundation
 import Observation
 
@@ -23,8 +24,18 @@ struct SavedSetup: Codable, Identifiable, Equatable {
         var apps: [String] = []
     }
 
+    /// When a setup puts itself in place: a speaker or mic connecting (its UID), or an app opening
+    /// (its bundle ID).
+    struct Trigger: Codable, Equatable {
+        enum Kind: String, Codable { case deviceConnects, appOpens }
+        var kind: Kind
+        var id: String
+    }
+
     var id = UUID()
     var name: String
+    /// Applied by itself when this happens (nil: only by hand).
+    var trigger: Trigger?
     /// The speakers to play through, the first being macOS's default.
     var speakers: [Level] = []
     var apps: [AppLevel] = []
@@ -66,5 +77,7 @@ final class SetupStore {
 
     private func save() {
         UserDefaults.standard.set(try? JSONEncoder().encode(setups), forKey: Self.key)
+        // Siri's "Apply <setup> in Soundcheck" learns the new names.
+        SoundcheckShortcuts.updateAppShortcutParameters()
     }
 }

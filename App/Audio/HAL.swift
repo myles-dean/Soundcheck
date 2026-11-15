@@ -78,6 +78,27 @@ enum HAL {
 
     static func deviceUID(_ id: AudioObjectID) -> String? { string(id, kAudioDevicePropertyDeviceUID) }
 
+    /// How long after an IO cycle hands a device a frame it's heard (seconds): the device's own
+    /// latency plus its first output stream's. Bluetooth and HDMI speakers can take a good while
+    /// longer than the Mac's own.
+    static func outputLatency(_ device: AudioObjectID) -> TimeInterval {
+        let scope = kAudioObjectPropertyScopeOutput
+        let rate = read(device, kAudioDevicePropertyNominalSampleRate, initial: Float64(0)) ?? 0
+        guard rate > 0 else { return 0 }
+        let latency = read(device, kAudioDevicePropertyLatency, scope: scope, initial: UInt32(0)) ?? 0
+        let stream = array(device, kAudioDevicePropertyStreams, scope: scope, zero: AudioStreamID(0)).first
+        let streamLatency = stream.flatMap { read($0, kAudioStreamPropertyLatency, initial: UInt32(0)) } ?? 0
+        return Double(latency + streamLatency) / rate
+    }
+
+    /// How much later (seconds) each of these outputs has to play to sound together with the
+    /// slowest of them.
+    static func alignment(_ uids: [String]) -> [TimeInterval] {
+        let latencies = uids.map { outputLatency(device(forUID: $0)) }
+        let slowest = latencies.max() ?? 0
+        return latencies.map { min(slowest - $0, 1) }
+    }
+
     /// Finds hidden devices too (they're left out of the device list).
     static func device(forUID uid: String) -> AudioObjectID {
         var address = address(kAudioHardwarePropertyTranslateUIDToDevice)

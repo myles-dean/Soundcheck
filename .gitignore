@@ -5,3 +5,5 @@ build/
 Soundcheck.xcodeproj/
 App/Info.plist
 App/Soundcheck.entitlements
+Extension/Safari/Info.plist
+Extension/Safari/Safari.entitlements

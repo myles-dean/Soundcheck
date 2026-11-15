@@ -104,11 +104,14 @@ struct VolumeHUDView: View {
         VStack(alignment: .leading, spacing: 18) {
             switch engine.knob {
             case .speakers:
+                // Muted with the Mac's mute, or on its own (its bar's icon in the panel).
                 ForEach(engine.playsLocally ? engine.activeOutputs : []) { device in
-                    HUDRow(title: device.name, value: engine.outputVolume(device), muted: engine.isMuted)
+                    HUDRow(title: device.name, value: engine.outputVolume(device),
+                           muted: engine.isMuted || engine.isSpeakerMuted(device.uid))
                 }
                 ForEach(engine.activeAirPlay) { speaker in
-                    HUDRow(title: speaker.name, value: engine.airPlayVolume(speaker), muted: engine.isMuted)
+                    HUDRow(title: speaker.name, value: engine.airPlayVolume(speaker),
+                           muted: engine.isMuted || engine.isSpeakerMuted(AudioEngine.airPlayKey(speaker.id)))
                 }
             case .apps:
                 if engine.visibleApps.isEmpty {
@@ -122,7 +125,8 @@ struct VolumeHUDView: View {
                     HUDRow(title: "Microphone", value: engine.knobValue, muted: false, low: "mic.fill", high: "mic.and.signal.meter.fill")
                 }
                 ForEach(engine.activeMics) { device in
-                    HUDRow(title: device.name, value: engine.micVolume(device) ?? 0, muted: false,
+                    HUDRow(title: device.name, value: engine.micVolume(device) ?? 0,
+                           muted: engine.micsMuted || engine.isMicMuted(device.uid),
                            low: "mic.fill", high: "mic.and.signal.meter.fill")
                 }
             }
@@ -135,6 +139,8 @@ struct VolumeHUDView: View {
 }
 
 /// A name (with the app's icon for apps) over a level bar, laid out like macOS's volume pill.
+/// Muted, it says so next to the name and its bar keeps the level, dimmed, so muted and turned all
+/// the way down don't look the same.
 struct HUDRow: View {
     let title: String
     var icon: NSImage?
@@ -154,8 +160,14 @@ struct HUDRow: View {
                 }
                 Text(title)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(ink)
+                    .foregroundStyle(muted ? ink.opacity(0.55) : ink)
                     .lineLimit(1)
+                if muted {
+                    Spacer(minLength: 4)
+                    Text("Muted")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ink.opacity(0.55))
+                }
             }
             HUDBar(value: value, muted: muted, low: low, high: high, ink: ink)
         }
@@ -172,12 +184,13 @@ struct HUDBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: muted ? "speaker.slash.fill" : low)
+            // Crossed out to match (a mic's for a mic).
+            Image(systemName: muted ? low.replacingOccurrences(of: ".fill", with: ".slash.fill") : low)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(ink)
                 .frame(width: 14)
             VStack(spacing: 3) {
-                LevelBar(value: muted ? 0 : value, ink: ink)
+                LevelBar(value: value, ink: ink, dimmed: muted)
                     .frame(height: 4)
                 HStack(spacing: 0) {
                     ForEach(0...16, id: \.self) { step in
@@ -189,23 +202,24 @@ struct HUDBar: View {
             .padding(.top, 4.5) // keeps the bar level with the speakers, the dots hanging below
             Image(systemName: high)
                 .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(ink)
+                .foregroundStyle(muted ? ink.opacity(0.35) : ink)
         }
         .animation(.easeOut(duration: 0.1), value: value)
     }
 }
 
-/// A filled bar on a faint track.
+/// A filled bar on a faint track (dimmed: the level of something muted).
 struct LevelBar: View {
     let value: Float
     var ink = Color.white
+    var dimmed = false
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .leading) {
                 Capsule().fill(ink.opacity(0.1))
                 Capsule()
-                    .fill(ink)
+                    .fill(ink.opacity(dimmed ? 0.3 : 1))
                     .frame(width: max(geometry.size.height, geometry.size.width * CGFloat(value)))
                     .opacity(value > 0.001 ? 1 : 0)
             }

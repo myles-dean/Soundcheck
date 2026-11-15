@@ -12,18 +12,30 @@ final class PanelState {
     /// The app whose own outputs are listed (while split).
     var routingApp: String?
     var optionsOpen = false
+    /// The Options section that's open (one at a time).
+    var optionsGroup: SettingsGroup?
     var pinsOpen = false
     var airPlayOpen = false
     var appsOpen = false
+    /// The EQ that's open: whose, and which bar it was opened from (a speaker's EQ can be opened
+    /// from the main bar or from its own bar in the list, and only that one opens).
+    var shaping: EQSpot?
+    /// The bar whose list of microphones to hear is open (right-clicking its headphones button).
+    var hearing: EQSpot?
+    /// Browsers whose tabs are listed under them in Apps.
+    var openBrowsers: Set<String> = []
 
     func reset() {
         outputsOpen = false
         inputsOpen = false
         routingApp = nil
         optionsOpen = false
+        optionsGroup = nil
         pinsOpen = false
         airPlayOpen = false
         appsOpen = false
+        shaping = nil
+        hearing = nil
     }
 }
 

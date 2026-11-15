@@ -5,12 +5,14 @@ import SwiftUI
 @MainActor
 enum AppLookup {
     static func name(_ id: String) -> String {
+        if id == AudioApp.systemID { return "System" }
         if let app = AudioEngine.shared.apps.first(where: { $0.id == id }) { return app.name }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else { return id }
         return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
     }
 
     static func icon(_ id: String) -> NSImage {
+        if id == AudioApp.systemID { return AudioApp.systemIcon }
         if let app = AudioEngine.shared.apps.first(where: { $0.id == id }) { return app.icon }
         guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) else {
             return NSWorkspace.shared.icon(for: .applicationBundle)

@@ -16,19 +16,30 @@ final class MainMixer: @unchecked Sendable {
         let tap: TapPlayer.Source
         let gain: SharedValue
         let muted: SharedValue
+        /// The app's own EQ (none for everything else).
+        var shape: ShapeControl?
+        /// The AirPlay speakers it's sent to on its own (indexes into the mixer's AirPlay
+        /// speakers); none: it's in the main mix.
+        var airPlay: [Int] = []
     }
 
     let outputUIDs: [String]
     let sourceSignature: [TapPlayer.Source]
+    let sourceRouting: [[Int]]
+    /// The AirPlay speakers with a mix of their own (their IDs), when an app is sent to one of
+    /// them; none: every AirPlay speaker shares the one mix (`feeds[0]`).
+    let airPlaySlots: [String]
     private var tapIDs: [AudioObjectID] = []
     private var aggregateID = AudioObjectID.unknown
     private var procID: AudioDeviceIOProcID?
     private let queue = DispatchQueue(label: "com.mylesdean.Soundcheck.mainmix", qos: .userInteractive)
     let sampleRate: Double
-    let feed: AirPlayFeed
+    /// One per AirPlay speaker with a mix of its own, or one for all of them.
+    let feeds: [AirPlayFeed]
 
     // Kept alive for the audio thread, which only touches the raw pointers below.
     private let keep: [SharedValue]
+    private let keepShapes: [ShapeControl]
     private let state: UnsafeMutablePointer<MixState>
 
     /// How long the regular speakers are held back (frames at `sampleRate`).
@@ -37,11 +48,19 @@ final class MainMixer: @unchecked Sendable {
         state.pointee.delay = min(max(frames, 0), MixState.ringFrames - MixState.maxFrames - 1)
     }
 
-    init(outputs: [(uid: String, gain: SharedValue)], silent: Bool, sources: [Source], timeline: AirPlayTimeline) throws {
+    init(outputs: [TapOutput], silent: Bool, sources: [Source], airPlaySlots: [String], night: SharedValue, timeline: AirPlayTimeline) throws {
         guard let clock = outputs.first?.uid else { throw HALError(status: kAudioHardwareBadDeviceError, what: "find an output") }
         outputUIDs = outputs.map(\.uid)
         sourceSignature = sources.map(\.tap)
-        keep = outputs.map(\.gain) + sources.flatMap { [$0.gain, $0.muted] }
+        sourceRouting = sources.map(\.airPlay)
+        self.airPlaySlots = airPlaySlots
+        keep = outputs.map(\.gain) + sources.flatMap { [$0.gain, $0.muted] } + [night]
+        let flat = ShapeControl()
+        let sourceShapes = sources.map { $0.shape ?? flat }
+        keepShapes = outputs.map(\.shape) + sourceShapes
+        let clockDevice = HAL.device(forUID: clock)
+        let rate = HAL.read(clockDevice, kAudioDevicePropertyNominalSampleRate, initial: Float64(48_000)) ?? 48_000
+        sampleRate = rate
 
         // Input buffers: any input streams the speakers have come first, then one per tap.
         var deviceInputs = 0
@@ -52,22 +71,23 @@ final class MainMixer: @unchecked Sendable {
             let streams = HAL.array(device, kAudioDevicePropertyStreams, scope: kAudioObjectPropertyScopeOutput, zero: AudioStreamID(0)).count
             outputMap += Array(repeating: index, count: streams)
         }
+        // Each output held back a little more to sound together with the slowest of them.
+        let alignment = HAL.alignment(outputUIDs)
+        let extra = outputMap.map { Int((alignment[$0] * rate).rounded()) }
         state = .allocate(capacity: 1)
-        state.initialize(to: MixState(firstTap: deviceInputs, silent: silent,
+        let masks: [UInt64] = sources.map { source in
+            source.airPlay.filter { $0 >= 0 && $0 < min(airPlaySlots.count, 64) }.reduce(UInt64(0)) { $0 | (1 << UInt64($1)) }
+        }
+        state.initialize(to: MixState(firstTap: deviceInputs, silent: silent, sampleRate: rate, bufferExtra: extra, night: night.pointer,
+                                      slots: min(airPlaySlots.count, 64), sourceSlots: masks,
                                       sourceGains: sources.map(\.gain.pointer), sourceMutes: sources.map(\.muted.pointer),
-                                      outputGains: outputs.map(\.gain.pointer), outputMap: outputMap))
-
-        let clockDevice = HAL.device(forUID: clock)
-        let rate = HAL.read(clockDevice, kAudioDevicePropertyNominalSampleRate, initial: Float64(48_000)) ?? 48_000
-        sampleRate = rate
-        // How long after the IO proc hands a frame over it's heard: the device's latency plus its
-        // first output stream's (HDMI and Bluetooth speakers can take a while).
-        let outputScope = kAudioObjectPropertyScopeOutput
-        let deviceLatency = HAL.read(clockDevice, kAudioDevicePropertyLatency, scope: outputScope, initial: UInt32(0)) ?? 0
-        let stream = HAL.array(clockDevice, kAudioDevicePropertyStreams, scope: outputScope, zero: AudioStreamID(0)).first
-        let streamLatency = stream.flatMap { HAL.read($0, kAudioStreamPropertyLatency, initial: UInt32(0)) } ?? 0
-        let latency = silent ? 0 : Double(deviceLatency + streamLatency) / rate
-        feed = AirPlayFeed(sampleRate: rate, timeline: timeline, outputLatency: latency)
+                                      sourceShapes: sourceShapes,
+                                      outputGains: outputs.map(\.gain.pointer),
+                                      bufferShapes: outputMap.map { outputs[$0].shape }, outputMap: outputMap))
+        // How long after the IO proc hands a frame over it's heard: the slowest output's latency,
+        // since the others are held back to match it (HDMI and Bluetooth speakers can take a while).
+        let latency = silent ? 0 : (outputUIDs.map { HAL.outputLatency(HAL.device(forUID: $0)) }.max() ?? 0)
+        feeds = (0..<max(airPlaySlots.count, 1)).map { _ in AirPlayFeed(sampleRate: rate, timeline: timeline, outputLatency: latency) }
 
         // Once everything's set, a throw still runs deinit, which cleans up.
         var tapUUIDs: [UUID] = []
@@ -107,16 +127,16 @@ final class MainMixer: @unchecked Sendable {
         aggregateID = aggregate
 
         var proc: AudioDeviceIOProcID?
-        let state = self.state, feed = self.feed
+        let state = self.state, feeds = self.feeds
         status = AudioDeviceCreateIOProcIDWithBlock(&proc, aggregateID, queue) { _, input, _, output, outputTime in
-            MainMixer.render(input, output, outputTime: outputTime, state: state, feed: feed)
+            MainMixer.render(input, output, outputTime: outputTime, state: state, feeds: feeds)
         }
         if status == noErr {
             procID = proc
             status = AudioDeviceStart(aggregateID, procID)
         }
         guard status == noErr else { throw HALError(status: status, what: "start the main mix") }
-        feed.start()
+        for feed in feeds { feed.start() }
     }
 
     deinit {
@@ -131,7 +151,7 @@ final class MainMixer: @unchecked Sendable {
     var isAlive: Bool { aggregateID.isValid && HAL.isAlive(aggregateID) }
 
     private func teardown() {
-        feed.stop()
+        for feed in feeds { feed.stop() }
         if aggregateID.isValid {
             if let procID {
                 AudioDeviceStop(aggregateID, procID)
@@ -165,11 +185,27 @@ final class MainMixer: @unchecked Sendable {
         let buffers: Int
         let mix: UnsafeMutablePointer<Float>
         let ring: UnsafeMutablePointer<Float>
+        /// One source at a time, through its app's EQ, on its way into the mix.
+        let scratch: UnsafeMutablePointer<Float>
+        let sourceShapes: UnsafeMutablePointer<ShapeDSP>
+        let bufferShapes: UnsafeMutablePointer<ShapeDSP>
+        /// How much later still each output buffer reads (to line up with the slowest output).
+        let bufferExtra: UnsafeMutablePointer<Int>
+        /// Night Mode (1: on) and each source's compressor.
+        let night: UnsafeMutablePointer<Float>
+        let sourceNight: UnsafeMutablePointer<Compressor>
+        /// AirPlay speakers with a mix of their own: how many, each one's mix (the main mix plus
+        /// the apps sent to it), and which of them each source goes to (0: the main mix).
+        let slots: Int
+        let slotMixes: UnsafeMutablePointer<Float>
+        let sourceSlots: UnsafeMutablePointer<UInt64>
         var written = 0
         var delay = 0
 
-        init(firstTap: Int, silent: Bool, sourceGains: [UnsafeMutablePointer<Float>], sourceMutes: [UnsafeMutablePointer<Float>],
-             outputGains: [UnsafeMutablePointer<Float>], outputMap: [Int]) {
+        init(firstTap: Int, silent: Bool, sampleRate: Double, bufferExtra: [Int], night: UnsafeMutablePointer<Float>,
+             slots: Int, sourceSlots: [UInt64], sourceGains: [UnsafeMutablePointer<Float>],
+             sourceMutes: [UnsafeMutablePointer<Float>], sourceShapes: [ShapeControl],
+             outputGains: [UnsafeMutablePointer<Float>], bufferShapes: [ShapeControl], outputMap: [Int]) {
             self.firstTap = firstTap
             self.silent = silent
             sources = sourceGains.count
@@ -191,9 +227,40 @@ final class MainMixer: @unchecked Sendable {
             mix.initialize(repeating: 0, count: Self.maxFrames * 2)
             ring = .allocate(capacity: Self.ringFrames * 2)
             ring.initialize(repeating: 0, count: Self.ringFrames * 2)
+            scratch = .allocate(capacity: Self.maxFrames * 2)
+            scratch.initialize(repeating: 0, count: Self.maxFrames * 2)
+            self.sourceShapes = .allocate(capacity: max(sources, 1))
+            for index in 0..<sources {
+                (self.sourceShapes + index).initialize(to: ShapeDSP(control: sourceShapes[index], sampleRate: sampleRate))
+            }
+            self.bufferShapes = .allocate(capacity: max(buffers, 1))
+            for index in 0..<buffers {
+                (self.bufferShapes + index).initialize(to: ShapeDSP(control: bufferShapes[index], sampleRate: sampleRate))
+            }
+            self.night = night
+            self.slots = slots
+            slotMixes = .allocate(capacity: max(slots, 1) * Self.maxFrames * 2)
+            slotMixes.initialize(repeating: 0, count: max(slots, 1) * Self.maxFrames * 2)
+            self.sourceSlots = .allocate(capacity: max(sources, 1))
+            for index in 0..<max(sources, 1) { (self.sourceSlots + index).initialize(to: index < sourceSlots.count ? sourceSlots[index] : 0) }
+            sourceNight = .allocate(capacity: max(sources, 1))
+            for index in 0..<max(sources, 1) { (sourceNight + index).initialize(to: .nightMode(sampleRate: sampleRate)) }
+            self.bufferExtra = .allocate(capacity: max(buffers, 1))
+            for index in 0..<buffers {
+                (self.bufferExtra + index).initialize(to: min(max(index < bufferExtra.count ? bufferExtra[index] : 0, 0), 48_000))
+            }
         }
 
         func release() {
+            for index in 0..<sources { sourceShapes[index].release() }
+            for index in 0..<buffers { bufferShapes[index].release() }
+            sourceShapes.deallocate()
+            bufferShapes.deallocate()
+            bufferExtra.deallocate()
+            sourceNight.deallocate()
+            slotMixes.deallocate()
+            sourceSlots.deallocate()
+            scratch.deallocate()
             sourceGains.deallocate()
             sourceMutes.deallocate()
             sourceCurrent.deallocate()
@@ -205,7 +272,7 @@ final class MainMixer: @unchecked Sendable {
     }
 
     private static func render(_ inputList: UnsafePointer<AudioBufferList>, _ outputList: UnsafeMutablePointer<AudioBufferList>,
-                               outputTime: UnsafePointer<AudioTimeStamp>, state: UnsafeMutablePointer<MixState>, feed: AirPlayFeed) {
+                               outputTime: UnsafePointer<AudioTimeStamp>, state: UnsafeMutablePointer<MixState>, feeds: [AirPlayFeed]) {
         let inputs = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputList))
         let outputs = UnsafeMutableAudioBufferListPointer(outputList)
         var frames = 0
@@ -216,8 +283,11 @@ final class MainMixer: @unchecked Sendable {
         frames = min(frames, MixState.maxFrames)
         let mix = state.pointee.mix
         memset(mix, 0, frames * 2 * MemoryLayout<Float>.size)
+        let slots = state.pointee.slots, slotMixes = state.pointee.slotMixes, stride = MixState.maxFrames * 2
+        for slot in 0..<slots { memset(slotMixes + slot * stride, 0, frames * 2 * MemoryLayout<Float>.size) }
 
-        // Add up the taps at their levels (eased, so changes don't click).
+        // Add up the taps at their levels (eased, so changes don't click), each through its app's EQ.
+        let scratch = state.pointee.scratch
         for source in 0..<state.pointee.sources {
             let index = state.pointee.firstTap + source
             guard index < inputs.count, let data = inputs[index].mData else { continue }
@@ -230,16 +300,38 @@ final class MainMixer: @unchecked Sendable {
                 gain += (target - gain) * 0.002
                 let left = samples[frame * channels]
                 let right = channels > 1 ? samples[frame * channels + 1] : left
-                mix[frame * 2] += left * gain
-                mix[frame * 2 + 1] += right * gain
+                scratch[frame * 2] = left * gain
+                scratch[frame * 2 + 1] = right * gain
             }
             state.pointee.sourceCurrent[source] = gain
+            state.pointee.sourceShapes[source].process(scratch, frames: available, channels: 2)
+            state.pointee.sourceNight[source].process(scratch, frames: available, channels: 2, on: state.pointee.night.pointee > 0.5)
+            // The main mix, or only the AirPlay speakers it's sent to.
+            let mask = state.pointee.sourceSlots[source]
+            if mask == 0 {
+                for sample in 0..<(available * 2) { mix[sample] += scratch[sample] }
+            } else {
+                for slot in 0..<slots where mask & (1 << UInt64(slot)) != 0 {
+                    let slotMix = slotMixes + slot * stride
+                    for sample in 0..<(available * 2) { slotMix[sample] += scratch[sample] }
+                }
+            }
         }
 
         // To AirPlay as it is (the speakers add their own delay), stamped with the moment this mix
         // would reach the Mac's own speakers if it weren't held back: the shared reference point.
         let stamped = outputTime.pointee.mFlags.contains(.hostTimeValid)
-        feed.push(mix, frames: frames, hostTime: stamped ? outputTime.pointee.mHostTime : mach_absolute_time())
+        let hostTime = stamped ? outputTime.pointee.mHostTime : mach_absolute_time()
+        if slots == 0 {
+            feeds[0].push(mix, frames: frames, hostTime: hostTime)
+        } else {
+            // Each AirPlay speaker with a mix of its own: the main mix plus the apps sent to it.
+            for slot in 0..<min(slots, feeds.count) {
+                let slotMix = slotMixes + slot * stride
+                for sample in 0..<(frames * 2) { slotMix[sample] += mix[sample] }
+                feeds[slot].push(slotMix, frames: frames, hostTime: hostTime)
+            }
+        }
 
         // Into the delay line, and out of it, held back, to the regular speakers.
         let ring = state.pointee.ring
@@ -261,8 +353,9 @@ final class MainMixer: @unchecked Sendable {
             let count = min(frames, Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * channels))
             let gain = state.pointee.outputGains[state.pointee.outputMap[index]].pointee
             let out = data.assumingMemoryBound(to: Float.self)
+            let held = min(delay + state.pointee.bufferExtra[index], MixState.ringFrames - MixState.maxFrames - 1)
             for frame in 0..<count {
-                let position = start + frame - delay
+                let position = start + frame - held
                 guard position >= 0 else { continue }
                 let slot = position % size
                 let left = ring[slot * 2] * gain, right = ring[slot * 2 + 1] * gain
@@ -272,6 +365,12 @@ final class MainMixer: @unchecked Sendable {
                     out[frame * channels] = left
                     out[frame * channels + 1] = right
                 }
+            }
+            // The speaker's own shape, then peaks rounded off.
+            state.pointee.bufferShapes[index].process(out, frames: count, channels: channels)
+            for frame in 0..<count {
+                out[frame * channels] = softLimit(out[frame * channels])
+                if channels > 1 { out[frame * channels + 1] = softLimit(out[frame * channels + 1]) }
             }
         }
     }
@@ -298,8 +397,27 @@ final class AirPlayFeed: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.mylesdean.Soundcheck.airplayfeed", qos: .userInitiated)
     private var timer: DispatchSourceTimer?
     private let lock = NSLock()
-    /// The sessions, each with how much earlier (frames) it gets the sound, to line it up.
-    private var sessions: [(session: AirPlaySession, earlier: Int64)] = []
+    /// A session, how much earlier (frames) it gets the sound to line it up, and its speaker's
+    /// shape (on the feeder's queue only).
+    private final class Target {
+        let session: AirPlaySession
+        /// Changed under the lock (read with it too).
+        var earlier: Int64
+        let control: ShapeControl?
+        /// Only touched on the feeder's queue.
+        var shape: ShapeDSP?
+        init(session: AirPlaySession, earlier: Int64, shape: ShapeControl?) {
+            self.session = session
+            self.earlier = earlier
+            control = shape
+            self.shape = shape.map { ShapeDSP(control: $0, sampleRate: 44_100) }
+        }
+        deinit { shape?.release() }
+    }
+    private var sessions: [Target] = []
+    /// Shaped samples for one session (feeder's queue only).
+    private var shaped: [Float] = []
+    private var shapedOut: [Int16] = []
     /// Where on the shared AirPlay timeline the next frame goes; nil until the first frames.
     private var position: Int64?
     private let converter: AVAudioConverter?
@@ -327,9 +445,17 @@ final class AirPlayFeed: @unchecked Sendable {
         ring.deallocate()
     }
 
-    func setSessions(_ sessions: [(session: AirPlaySession, earlier: Int64)]) {
+    /// The sessions to feed. Ones already fed keep their EQ's state, so nothing clicks.
+    func setSessions(_ sessions: [(session: AirPlaySession, earlier: Int64, shape: ShapeControl?)]) {
         lock.lock()
-        self.sessions = sessions
+        let current = self.sessions
+        self.sessions = sessions.map { wanted in
+            if let target = current.first(where: { $0.session === wanted.session && $0.control === wanted.shape }) {
+                target.earlier = wanted.earlier
+                return target
+            }
+            return Target(session: wanted.session, earlier: wanted.earlier, shape: wanted.shape)
+        }
         lock.unlock()
     }
 
@@ -374,6 +500,15 @@ final class AirPlayFeed: @unchecked Sendable {
         } while writeHost.load(ordering: .relaxed) != endHost
         let available = write - read
         let firstHost = endHost &- UInt64(Double(available) / sampleRate * ticksPerSecond)
+        // No AirPlay speakers connected (yet): nothing to convert, and the next one starts afresh.
+        lock.lock()
+        let idle = sessions.isEmpty
+        lock.unlock()
+        if idle {
+            readIndex.store(write, ordering: .releasing)
+            position = nil
+            return
+        }
         guard available > 0, let converter, let inputFormat, let outputFormat,
               let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: AVAudioFrameCount(available)) else { return }
         let destination = input.floatChannelData![0]
@@ -420,12 +555,32 @@ final class AirPlayFeed: @unchecked Sendable {
         position = at + Int64(frames)
         guard at >= 1 else { return }
         lock.lock()
-        let targets = sessions
+        let targets = sessions.map { (target: $0, earlier: $0.earlier) }
         lock.unlock()
-        for target in targets where at - target.earlier >= 1 {
-            let start = UInt64(at - target.earlier)
-            if repeatFirst { target.session.enqueue(samples, frames: 1, position: start - 1) }
-            target.session.enqueue(samples, frames: frames, position: start)
+        for (target, earlier) in targets where at - earlier >= 1 {
+            let start = UInt64(at - earlier)
+            // The speaker's own shape (EQ, balance, mono) on a copy, when it has one.
+            guard target.shape?.isActive() == true else {
+                if repeatFirst { target.session.enqueue(samples, frames: 1, position: start - 1) }
+                target.session.enqueue(samples, frames: frames, position: start)
+                continue
+            }
+            if shaped.count < frames * 2 {
+                shaped = [Float](repeating: 0, count: frames * 2)
+                shapedOut = [Int16](repeating: 0, count: frames * 2)
+            }
+            shaped.withUnsafeMutableBufferPointer { floats in
+                shapedOut.withUnsafeMutableBufferPointer { ints in
+                    guard let base = floats.baseAddress, let out = ints.baseAddress else { return }
+                    for sample in 0..<(frames * 2) { base[sample] = Float(samples[sample]) / 32_768 }
+                    target.shape?.process(base, frames: frames, channels: 2)
+                    for sample in 0..<(frames * 2) {
+                        out[sample] = Int16(max(-32_768, min(32_767, (softLimit(base[sample]) * 32_768).rounded())))
+                    }
+                    if repeatFirst { target.session.enqueue(out, frames: 1, position: start - 1) }
+                    target.session.enqueue(out, frames: frames, position: start)
+                }
+            }
         }
     }
 }

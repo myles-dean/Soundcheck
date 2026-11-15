@@ -5,14 +5,19 @@ options:
   deploymentTarget:
     macOS: "26.0"
   createIntermediateGroups: true
+packages:
+  # Updates for copies installed from the DMG (Homebrew installs update through brew).
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle
+    majorVersion: 2.6.0
 settings:
   base:
     DEVELOPMENT_TEAM: 3N7MVP4K42
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: Apple Development
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.0.1"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "1.1"
+    CURRENT_PROJECT_VERSION: "3"
     ENABLE_HARDENED_RUNTIME: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     DEAD_CODE_STRIPPING: YES
@@ -23,7 +28,23 @@ targets:
     scheme: {}
     sources:
       - App
+      # The Chrome-based browsers' extension (Dia, Chrome, Edge, Brave, Arc), copied to Application
+      # Support at launch for "Load unpacked".
+      - path: Extension/Shared
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: Browser Extension
+      - path: Extension/Chromium/manifest.json
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: Browser Extension
     dependencies:
+      - package: Sparkle
+      # Soundcheck's Safari extension, at Contents/PlugIns.
+      - target: SoundcheckSafari
+        embed: true
       # The virtual microphone driver travels inside the app, at Contents/Resources/SoundcheckMic.driver.
       - target: SoundcheckMic
         embed: true
@@ -39,6 +60,11 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         LSUIElement: true
         NSHumanReadableCopyright: © 2026 Myles Dean
+        # Updates (Sparkle): each release attaches appcast.xml, signed with the key in the login
+        # Keychain (account "Soundcheck"); this is its public half.
+        SUFeedURL: https://github.com/myles-dean/Soundcheck/releases/latest/download/appcast.xml
+        SUPublicEDKey: XYbyTdvJTH7z3dEW+PdiDhLx7C43z8Q3tTTBeTWGrFs=
+        SUEnableAutomaticChecks: true
         # Per-app volume reads each app's audio through a Core Audio process tap, which macOS
         # puts behind the "System Audio Recording" permission.
         NSAudioCaptureUsageDescription: Soundcheck sets each app's volume, plays through several speakers and AirPlay, and routes apps into Soundcheck Mic by passing their sound through at the level you choose. Nothing is recorded or saved.
@@ -56,11 +82,50 @@ targets:
         # permission), which sandboxed apps can't have. Process taps count as audio input under
         # the hardened runtime.
         com.apple.security.device.audio-input: true
+        # Shared with the Safari extension, whose sandbox only lets it reach ports named for it.
+        com.apple.security.application-groups:
+          - 3N7MVP4K42.com.mylesdean.Soundcheck
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck
         PRODUCT_NAME: Soundcheck
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  # Soundcheck's Safari extension: the same scripts as the Chrome one, with Safari's manifest, and
+  # a handler that passes their messages to Soundcheck.
+  SoundcheckSafari:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Extension/Safari/SafariWebExtensionHandler.swift
+      - path: App/Browser/BrowserLink.swift
+      - path: Extension/Shared
+        buildPhase: resources
+      - path: Extension/Safari/manifest.json
+        buildPhase: resources
+    dependencies:
+      - sdk: SafariServices.framework
+    info:
+      path: Extension/Safari/Info.plist
+      properties:
+        CFBundleDisplayName: Soundcheck
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSHumanReadableCopyright: © 2026 Myles Dean
+        NSHumanReadableDescription: Gives each tab its own volume in Soundcheck, and lowers the other tabs and apps while a tab is on a call.
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.Safari.web-extension
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).SafariWebExtensionHandler
+    entitlements:
+      path: Extension/Safari/Safari.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups:
+          - 3N7MVP4K42.com.mylesdean.Soundcheck
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck.Safari
+        PRODUCT_NAME: SoundcheckSafari
+        SKIP_INSTALL: YES
   # The "Soundcheck Mic" Core Audio driver (an AudioServerPlugIn), which Route mixes into.
   SoundcheckMic:
     type: bundle
