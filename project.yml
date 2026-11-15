@@ -1,0 +1,92 @@
+# Xcode project for Soundcheck. Generate with `xcodegen` (./build.sh does it for you).
+name: Soundcheck
+options:
+  bundleIdPrefix: com.mylesdean
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: 3N7MVP4K42
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: Apple Development
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    DEAD_CODE_STRIPPING: YES
+targets:
+  Soundcheck:
+    type: application
+    platform: macOS
+    scheme: {}
+    sources:
+      - App
+    dependencies:
+      # The virtual microphone driver travels inside the app, at Contents/Resources/SoundcheckMic.driver.
+      - target: SoundcheckMic
+        embed: true
+        copy:
+          destination: resources
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Soundcheck
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleIconName: AppIcon
+        LSApplicationCategoryType: public.app-category.utilities
+        LSUIElement: true
+        NSHumanReadableCopyright: © 2026 Myles Dean
+        # Per-app volume reads each app's audio through a Core Audio process tap, which macOS
+        # puts behind the "System Audio Recording" permission.
+        NSAudioCaptureUsageDescription: Soundcheck sets each app's volume, plays through several speakers and AirPlay, and routes apps into Soundcheck Mic by passing their sound through at the level you choose. Nothing is recorded or saved.
+        # AirPlay speakers are found and streamed to over the local network.
+        NSLocalNetworkUsageDescription: Soundcheck finds AirPlay speakers on your network and plays your Mac's sound on the ones you choose.
+        NSBonjourServices:
+          - _raop._tcp
+          - _airplay._tcp
+        # Soundcheck Mic carries the microphone you choose (mixed with apps, with Route).
+        NSMicrophoneUsageDescription: Soundcheck carries the microphone you choose into Soundcheck Mic (mixed with the apps you route), so every app hears it without changing its own microphone. Nothing is recorded or saved.
+    entitlements:
+      path: App/Soundcheck.entitlements
+      properties:
+        # Not sandboxed: taking over the volume keys needs an event tap (and the Accessibility
+        # permission), which sandboxed apps can't have. Process taps count as audio input under
+        # the hardened runtime.
+        com.apple.security.device.audio-input: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck
+        PRODUCT_NAME: Soundcheck
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  # The "Soundcheck Mic" Core Audio driver (an AudioServerPlugIn), which Route mixes into.
+  SoundcheckMic:
+    type: bundle
+    platform: macOS
+    sources:
+      - Driver
+    dependencies:
+      - sdk: CoreAudio.framework
+      - sdk: CoreFoundation.framework
+    settings:
+      base:
+        PRODUCT_NAME: SoundcheckMic
+        PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck.MicrophoneDriver
+        WRAPPER_EXTENSION: driver
+        INFOPLIST_FILE: Driver/Info.plist
+        SKIP_INSTALL: YES
+  # Command-line check of the AirPlay sender: `AirPlayTest list`, `AirPlayTest tone "<name>"`.
+  AirPlayTest:
+    type: tool
+    platform: macOS
+    scheme: {}
+    sources:
+      - Tools/AirPlayTest
+      - App/AirPlay
+    settings:
+      base:
+        PRODUCT_NAME: AirPlayTest
+        PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck.AirPlayTest
+        SKIP_INSTALL: YES

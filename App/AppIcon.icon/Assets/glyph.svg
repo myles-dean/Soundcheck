@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="104" viewBox="0 0 120 104">
+ <!-- Three faders, like a mixing desk: a track each, with its knob at a different level. -->
+ <rect fill="#FFFFFF" x="15" y="2" width="8" height="100" rx="4"/>
+ <rect fill="#FFFFFF" x="56" y="2" width="8" height="100" rx="4"/>
+ <rect fill="#FFFFFF" x="97" y="2" width="8" height="100" rx="4"/>
+ <rect fill="#FFFFFF" x="2" y="54" width="34" height="18" rx="7"/>
+ <rect fill="#FFFFFF" x="43" y="22" width="34" height="18" rx="7"/>
+ <rect fill="#FFFFFF" x="84" y="66" width="34" height="18" rx="7"/>
+</svg>
