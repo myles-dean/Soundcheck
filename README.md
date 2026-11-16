@@ -26,6 +26,10 @@
   <a href="https://github.com/myles-dean/Soundcheck/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/myles-dean/Soundcheck?label=release"></a>
 </p>
 
+<p align="center">
+  <a href="https://ko-fi.com/mylesdean_"><img alt="Buy me a coffee on Ko-fi" src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white"></a>
+</p>
+
 ---
 
 **Soundcheck** replaces the Sound icon in your Mac's menu bar. Apple's Sound menu plays through one
