@@ -63,6 +63,8 @@ struct AudioDevice: Identifiable, Hashable {
             return "iphone"
         case kAudioDeviceTransportTypeVirtual:
             return "waveform"
+        case CompanionMics.transport:
+            return name.hasPrefix("iPad") ? "ipad" : "iphone"
         case kAudioDeviceTransportTypeAggregate:
             return "hifispeaker.2"
         default:
@@ -103,12 +105,31 @@ struct AudioDevice: Identifiable, Hashable {
         }
     }
 
+    init(id: AudioObjectID, uid: String, name: String, transport: UInt32, outputSource: UInt32) {
+        self.id = id
+        self.uid = uid
+        self.name = name
+        self.transport = transport
+        self.outputSource = outputSource
+    }
+
+    /// An iPhone's microphone through macOS's Continuity.
+    var isContinuity: Bool {
+        transport == kAudioDeviceTransportTypeContinuityCaptureWired || transport == kAudioDeviceTransportTypeContinuityCaptureWireless
+    }
+
     init?(id: AudioObjectID) {
         guard let uid = HAL.deviceUID(id) else { return nil }
         self.id = id
         self.uid = uid
-        name = HAL.string(id, kAudioObjectPropertyName) ?? "Unknown Device"
         transport = HAL.read(id, kAudioDevicePropertyTransportType, initial: UInt32(0)) ?? 0
+        // The iPhone's microphone through Continuity is named for its owner ("Myles Dean
+        // Microphone"): called what it is, beside the companion app's own ("iPhone (Soundcheck)").
+        if transport == kAudioDeviceTransportTypeContinuityCaptureWired || transport == kAudioDeviceTransportTypeContinuityCaptureWireless {
+            name = "iPhone (Continuity)"
+        } else {
+            name = HAL.string(id, kAudioObjectPropertyName) ?? "Unknown Device"
+        }
         outputSource = HAL.read(id, kAudioDevicePropertyDataSource, scope: kAudioObjectPropertyScopeOutput, initial: UInt32(0)) ?? 0
     }
 }

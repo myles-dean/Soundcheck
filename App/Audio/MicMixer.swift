@@ -33,9 +33,12 @@ final class MicMixer: @unchecked Sendable {
     // Kept alive for the audio thread, which only touches the raw pointers below.
     private let appGains: [SharedValue]
     private let shapes: [ShapeControl]
+    private let keepEffects: [EffectControl]
     private let state: UnsafeMutablePointer<MixState>
     private let sourceIDs: [String]
     let monitorUIDs: [String]
+    /// Companions' microphones (iPhone or iPad), which come over the network instead.
+    private let remoteRings: [CompanionMicRing]
 
     /// A microphone's or an app's level right now (0...1).
     func level(_ id: String) -> Float {
@@ -45,21 +48,30 @@ final class MicMixer: @unchecked Sendable {
 
     /// - Parameters:
     ///   - microphones: each microphone's UID, its gain (0 when it's turned all the way down or
-    ///     muted; its level is otherwise the device's own), its EQ, and whether it goes into
-    ///     Soundcheck Mic (one that doesn't is only there to be heard on a speaker).
+    ///     muted; its level is otherwise the device's own), its EQ and effects, and whether it goes
+    ///     into Soundcheck Mic (one that doesn't is only there to be heard on a speaker).
     ///   - apps: each routed app's id, its processes, and its level in the mix.
     ///   - monitor: the speakers to hear the microphones on (Hear Yourself), if any.
-    init(feedUID: String, microphones: [(uid: String, gain: SharedValue, shape: ShapeControl, feeds: Bool)],
+    init(feedUID: String, microphones: [(uid: String, gain: SharedValue, shape: ShapeControl, effects: EffectControl?, feeds: Bool)],
          apps: [(id: String, processes: [AudioObjectID], gain: SharedValue)], monitor: Monitor?, voice: Voice) throws {
         let microphoneUIDs = microphones.map(\.uid)
+        // A companion's microphone isn't a Core Audio device: it's read from its ring.
+        let isRemote = microphones.map { CompanionMics.device(fromUID: $0.uid) != nil }
+        let remotes = microphones.enumerated().compactMap { index, microphone -> (Int, CompanionMicRing)? in
+            guard let device = CompanionMics.device(fromUID: microphone.uid),
+                  let ring = CompanionMics.shared.ring(for: device, create: true) else { return nil }
+            return (index, ring)
+        }
+        remoteRings = remotes.map(\.1)
         appGains = apps.map(\.gain) + microphones.map(\.gain) + (monitor.map { [$0.level] + $0.outputs.map(\.gain) } ?? [])
             + [voice.cleanup, voice.duckApps]
         shapes = microphones.map(\.shape)
+        keepEffects = microphones.compactMap(\.effects)
         sourceIDs = microphoneUIDs + apps.map(\.id)
 
         // The aggregate's input buffers: each microphone's streams in order, then one per tap.
         var layout: [MixState.Input] = []
-        for (index, uid) in microphoneUIDs.enumerated() {
+        for (index, uid) in microphoneUIDs.enumerated() where !isRemote[index] {
             let streams = HAL.array(HAL.device(forUID: uid), kAudioDevicePropertyStreams,
                                     scope: kAudioObjectPropertyScopeInput, zero: AudioStreamID(0)).count
             for stream in 0..<streams {
@@ -78,7 +90,7 @@ final class MicMixer: @unchecked Sendable {
         let monitorOutputs = monitor?.outputs ?? []
         monitorUIDs = monitorOutputs.map(\.uid)
         let extra = monitorUIDs.filter { !microphoneUIDs.contains($0) && $0 != feedUID }
-        let subDeviceUIDs = [feedUID] + microphoneUIDs + extra
+        let subDeviceUIDs = [feedUID] + microphoneUIDs.enumerated().filter { !isRemote[$0.offset] }.map(\.element) + extra
         // The output buffers, in sub-device order: the feed's first stream is Soundcheck Mic; a
         // speaker's streams play the microphones (by its index in the monitor list); the rest
         // stay silent.
@@ -110,11 +122,17 @@ final class MicMixer: @unchecked Sendable {
         let feedDevice = HAL.device(forUID: feedUID)
         let rate = HAL.read(feedDevice, kAudioDevicePropertyNominalSampleRate, initial: Float64(48_000)) ?? 48_000
         state = .allocate(capacity: 1)
+        for microphone in microphones { microphone.effects?.prepare(sampleRate: rate) }
         state.initialize(to: MixState(inputs: layout, sources: sourceIDs.count, microphoneShapes: microphones.map(\.shape),
+                                      microphoneEffects: microphones.map(\.effects),
                                       sampleRate: rate, roles: roles,
                                       monitorGains: monitorOutputs.map(\.gain.pointer), monitorMasks: masks,
                                       monitorLevel: monitor?.level.pointer,
-                                      cleanup: voice.cleanup.pointer, duckApps: voice.duckApps.pointer))
+                                      cleanup: voice.cleanup.pointer, duckApps: voice.duckApps.pointer,
+                                      remotes: remotes.map { index, ring in
+                                          MixState.Remote(ring: Unmanaged.passUnretained(ring), microphone: index,
+                                                          gain: microphones[index].gain.pointer, feeds: microphones[index].feeds)
+                                      }))
 
         // Once everything's set, a throw still runs deinit, which cleans up.
         var tapUUIDs: [UUID] = []
@@ -207,14 +225,28 @@ final class MicMixer: @unchecked Sendable {
             let feeds: Bool
         }
 
+        /// A companion's microphone: its ring (kept alive by the mixer), which microphone it is,
+        /// its gain and whether it goes into Soundcheck Mic.
+        struct Remote {
+            let ring: Unmanaged<CompanionMicRing>
+            let microphone: Int
+            let gain: UnsafeMutablePointer<Float>
+            let feeds: Bool
+        }
+
         let inputCount: Int
         let inputs: UnsafeMutablePointer<Input>
+        let remoteCount: Int
+        let remotes: UnsafeMutablePointer<Remote>
+        let sampleRate: Double
         /// The latest peak of each microphone (after its EQ), then each app (0...1, before its
         /// gain: the panel's shade scales it by the slider).
         let peaks: UnsafeMutablePointer<Float>
         let sourceCount: Int
         let microphoneCount: Int
         let microphoneShapes: UnsafeMutablePointer<ShapeDSP>
+        /// Each microphone's effects, after its EQ and Voice Cleanup (not retained: the mixer keeps them).
+        let microphoneEffects: UnsafeMutablePointer<Unmanaged<EffectControl>?>
         /// What each output buffer plays (a monitor index, `feedRole` or `silentRole`).
         let roleCount: Int
         let roles: UnsafeMutablePointer<Int>
@@ -235,9 +267,14 @@ final class MicMixer: @unchecked Sendable {
         let microphoneCleanup: UnsafeMutablePointer<VoiceCleanup>
         var ducker: VoiceDucker
 
-        init(inputs: [Input], sources: Int, microphoneShapes: [ShapeControl], sampleRate: Double, roles: [Int],
+        init(inputs: [Input], sources: Int, microphoneShapes: [ShapeControl], microphoneEffects: [EffectControl?],
+             sampleRate: Double, roles: [Int],
              monitorGains: [UnsafeMutablePointer<Float>], monitorMasks: [UInt64], monitorLevel: UnsafeMutablePointer<Float>?,
-             cleanup: UnsafeMutablePointer<Float>, duckApps: UnsafeMutablePointer<Float>) {
+             cleanup: UnsafeMutablePointer<Float>, duckApps: UnsafeMutablePointer<Float>, remotes: [Remote]) {
+            self.sampleRate = sampleRate > 0 ? sampleRate : 48_000
+            remoteCount = remotes.count
+            self.remotes = .allocate(capacity: max(remotes.count, 1))
+            for (index, remote) in remotes.enumerated() { (self.remotes + index).initialize(to: remote) }
             self.cleanup = cleanup
             self.duckApps = duckApps
             microphoneCleanup = .allocate(capacity: max(microphoneShapes.count, 1))
@@ -253,6 +290,11 @@ final class MicMixer: @unchecked Sendable {
             self.microphoneShapes = .allocate(capacity: max(microphoneCount, 1))
             for (index, shape) in microphoneShapes.enumerated() {
                 (self.microphoneShapes + index).initialize(to: ShapeDSP(control: shape, sampleRate: sampleRate))
+            }
+            self.microphoneEffects = .allocate(capacity: max(microphoneCount, 1))
+            for index in 0..<max(microphoneCount, 1) {
+                let effects = index < microphoneEffects.count ? microphoneEffects[index] : nil
+                (self.microphoneEffects + index).initialize(to: effects.map { Unmanaged.passUnretained($0) })
             }
             roleCount = roles.count
             self.roles = .allocate(capacity: max(roles.count, 1))
@@ -274,8 +316,10 @@ final class MicMixer: @unchecked Sendable {
         func release() {
             for index in 0..<microphoneCount { microphoneShapes[index].release() }
             inputs.deallocate()
+            remotes.deallocate()
             peaks.deallocate()
             microphoneShapes.deallocate()
+            microphoneEffects.deallocate()
             roles.deallocate()
             monitorGains.deallocate()
             monitorMasks.deallocate()
@@ -324,6 +368,8 @@ final class MicMixer: @unchecked Sendable {
             }
             state.pointee.microphoneShapes[input.microphone].process(scratch, frames: available, channels: 2)
             state.pointee.microphoneCleanup[input.microphone].process(scratch, frames: available, channels: 2, on: cleanupOn)
+            state.pointee.microphoneEffects[input.microphone]?.takeUnretainedValue()
+                .process(scratch, frames: available, sampleRate: state.pointee.sampleRate)
             // Only a microphone that's on (and in Soundcheck Mic) counts as you talking.
             if input.feeds && gain > 0 && state.pointee.microphoneCleanup[input.microphone].talking { talking = true }
             let sound = sounds + input.microphone * stride
@@ -336,6 +382,28 @@ final class MicMixer: @unchecked Sendable {
             }
             if input.slot >= 0 && input.slot < state.pointee.sourceCount {
                 state.pointee.peaks[input.slot] = max(peak, state.pointee.peaks[input.slot] * 0.85) // held briefly, so no frame misses a peak
+            }
+        }
+        // Companions' microphones, the same way.
+        for index in 0..<state.pointee.remoteCount {
+            let remote = state.pointee.remotes[index]
+            remote.ring.takeUnretainedValue().read(into: scratch, frames: frames, sampleRate: state.pointee.sampleRate)
+            let gain = remote.gain.pointee
+            state.pointee.microphoneShapes[remote.microphone].process(scratch, frames: frames, channels: 2)
+            state.pointee.microphoneCleanup[remote.microphone].process(scratch, frames: frames, channels: 2, on: cleanupOn)
+            state.pointee.microphoneEffects[remote.microphone]?.takeUnretainedValue()
+                .process(scratch, frames: frames, sampleRate: state.pointee.sampleRate)
+            if remote.feeds && gain > 0 && state.pointee.microphoneCleanup[remote.microphone].talking { talking = true }
+            let sound = sounds + remote.microphone * stride
+            var peak: Float = 0
+            for sample in 0..<(frames * 2) {
+                peak = max(peak, abs(scratch[sample]))
+                let value = scratch[sample] * gain
+                sound[sample] = value
+                if remote.feeds { microphones[sample] += value }
+            }
+            if remote.microphone < state.pointee.sourceCount {
+                state.pointee.peaks[remote.microphone] = max(peak, state.pointee.peaks[remote.microphone] * 0.85)
             }
         }
         let duck = state.pointee.ducker.gains(frames: frames, talking: talking, on: state.pointee.duckApps.pointee > 0.5)

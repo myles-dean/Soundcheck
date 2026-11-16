@@ -18,6 +18,8 @@ final class MainMixer: @unchecked Sendable {
         let muted: SharedValue
         /// The app's own EQ (none for everything else).
         var shape: ShapeControl?
+        /// The app's own effects, after its EQ (none for everything else).
+        var effects: EffectControl?
         /// The AirPlay speakers it's sent to on its own (indexes into the mixer's AirPlay
         /// speakers); none: it's in the main mix.
         var airPlay: [Int] = []
@@ -40,6 +42,7 @@ final class MainMixer: @unchecked Sendable {
     // Kept alive for the audio thread, which only touches the raw pointers below.
     private let keep: [SharedValue]
     private let keepShapes: [ShapeControl]
+    private let keepEffects: [EffectControl]
     private let state: UnsafeMutablePointer<MixState>
 
     /// How long the regular speakers are held back (frames at `sampleRate`).
@@ -58,9 +61,11 @@ final class MainMixer: @unchecked Sendable {
         let flat = ShapeControl()
         let sourceShapes = sources.map { $0.shape ?? flat }
         keepShapes = outputs.map(\.shape) + sourceShapes
+        keepEffects = sources.compactMap(\.effects)
         let clockDevice = HAL.device(forUID: clock)
         let rate = HAL.read(clockDevice, kAudioDevicePropertyNominalSampleRate, initial: Float64(48_000)) ?? 48_000
         sampleRate = rate
+        for source in sources { source.effects?.prepare(sampleRate: rate) }
 
         // Input buffers: any input streams the speakers have come first, then one per tap.
         var deviceInputs = 0
@@ -81,7 +86,7 @@ final class MainMixer: @unchecked Sendable {
         state.initialize(to: MixState(firstTap: deviceInputs, silent: silent, sampleRate: rate, bufferExtra: extra, night: night.pointer,
                                       slots: min(airPlaySlots.count, 64), sourceSlots: masks,
                                       sourceGains: sources.map(\.gain.pointer), sourceMutes: sources.map(\.muted.pointer),
-                                      sourceShapes: sourceShapes,
+                                      sourceShapes: sourceShapes, sourceEffects: sources.map(\.effects),
                                       outputGains: outputs.map(\.gain.pointer),
                                       bufferShapes: outputMap.map { outputs[$0].shape }, outputMap: outputMap))
         // How long after the IO proc hands a frame over it's heard: the slowest output's latency,
@@ -188,6 +193,9 @@ final class MainMixer: @unchecked Sendable {
         /// One source at a time, through its app's EQ, on its way into the mix.
         let scratch: UnsafeMutablePointer<Float>
         let sourceShapes: UnsafeMutablePointer<ShapeDSP>
+        /// Each app's effects, after its EQ (not retained: the mixer keeps them).
+        let sourceEffects: UnsafeMutablePointer<Unmanaged<EffectControl>?>
+        let rate: Double
         let bufferShapes: UnsafeMutablePointer<ShapeDSP>
         /// How much later still each output buffer reads (to line up with the slowest output).
         let bufferExtra: UnsafeMutablePointer<Int>
@@ -204,9 +212,10 @@ final class MainMixer: @unchecked Sendable {
 
         init(firstTap: Int, silent: Bool, sampleRate: Double, bufferExtra: [Int], night: UnsafeMutablePointer<Float>,
              slots: Int, sourceSlots: [UInt64], sourceGains: [UnsafeMutablePointer<Float>],
-             sourceMutes: [UnsafeMutablePointer<Float>], sourceShapes: [ShapeControl],
+             sourceMutes: [UnsafeMutablePointer<Float>], sourceShapes: [ShapeControl], sourceEffects: [EffectControl?],
              outputGains: [UnsafeMutablePointer<Float>], bufferShapes: [ShapeControl], outputMap: [Int]) {
             self.firstTap = firstTap
+            rate = sampleRate
             self.silent = silent
             sources = sourceGains.count
             self.sourceGains = .allocate(capacity: max(sources, 1))
@@ -233,6 +242,11 @@ final class MainMixer: @unchecked Sendable {
             for index in 0..<sources {
                 (self.sourceShapes + index).initialize(to: ShapeDSP(control: sourceShapes[index], sampleRate: sampleRate))
             }
+            self.sourceEffects = .allocate(capacity: max(sources, 1))
+            for index in 0..<max(sources, 1) {
+                let effects = index < sourceEffects.count ? sourceEffects[index] : nil
+                (self.sourceEffects + index).initialize(to: effects.map { Unmanaged.passUnretained($0) })
+            }
             self.bufferShapes = .allocate(capacity: max(buffers, 1))
             for index in 0..<buffers {
                 (self.bufferShapes + index).initialize(to: ShapeDSP(control: bufferShapes[index], sampleRate: sampleRate))
@@ -255,6 +269,7 @@ final class MainMixer: @unchecked Sendable {
             for index in 0..<sources { sourceShapes[index].release() }
             for index in 0..<buffers { bufferShapes[index].release() }
             sourceShapes.deallocate()
+            sourceEffects.deallocate()
             bufferShapes.deallocate()
             bufferExtra.deallocate()
             sourceNight.deallocate()
@@ -305,6 +320,7 @@ final class MainMixer: @unchecked Sendable {
             }
             state.pointee.sourceCurrent[source] = gain
             state.pointee.sourceShapes[source].process(scratch, frames: available, channels: 2)
+            state.pointee.sourceEffects[source]?.takeUnretainedValue().process(scratch, frames: available, sampleRate: state.pointee.rate)
             state.pointee.sourceNight[source].process(scratch, frames: available, channels: 2, on: state.pointee.night.pointee > 0.5)
             // The main mix, or only the AirPlay speakers it's sent to.
             let mask = state.pointee.sourceSlots[source]
@@ -400,13 +416,13 @@ final class AirPlayFeed: @unchecked Sendable {
     /// A session, how much earlier (frames) it gets the sound to line it up, and its speaker's
     /// shape (on the feeder's queue only).
     private final class Target {
-        let session: AirPlaySession
+        let session: any SpeakerSession
         /// Changed under the lock (read with it too).
         var earlier: Int64
         let control: ShapeControl?
         /// Only touched on the feeder's queue.
         var shape: ShapeDSP?
-        init(session: AirPlaySession, earlier: Int64, shape: ShapeControl?) {
+        init(session: any SpeakerSession, earlier: Int64, shape: ShapeControl?) {
             self.session = session
             self.earlier = earlier
             control = shape
@@ -446,7 +462,7 @@ final class AirPlayFeed: @unchecked Sendable {
     }
 
     /// The sessions to feed. Ones already fed keep their EQ's state, so nothing clicks.
-    func setSessions(_ sessions: [(session: AirPlaySession, earlier: Int64, shape: ShapeControl?)]) {
+    func setSessions(_ sessions: [(session: any SpeakerSession, earlier: Int64, shape: ShapeControl?)]) {
         lock.lock()
         let current = self.sessions
         self.sessions = sessions.map { wanted in

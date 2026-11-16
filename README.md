@@ -34,11 +34,12 @@ Soundcheck puts all of it in one Liquid Glass panel that looks and moves like Co
 
 - **Speakers.** Play through as many speakers as you like at once, each at its own volume, with its
   own EQ, balance and mono.
-- **Apps.** A volume for every app that's making sound, with mute, boost, an EQ and its own speakers.
+- **Apps.** A volume for every app that's making sound, with mute, boost, an EQ, effects and its own
+  speakers.
 - **AirPlay.** Stream to HomePods and other AirPlay speakers, in sync with your Mac's own speakers.
 - **Mics.** One virtual microphone, *Soundcheck Mic*, that every app uses. Pick the real mic once, in
-  Soundcheck, or mix several mics and apps into it, give each mic an EQ, and hear yourself in your
-  headphones.
+  Soundcheck, or mix several mics and apps into it, give each mic an EQ and effects, and hear yourself
+  in your headphones.
 - **Shortcuts and Siri.** Switch speakers, set an app's volume or apply a saved setup from a shortcut.
 - **The volume keys.** Your keyboard's volume keys move whichever group you pick (speakers, apps or
   mics), with an Apple-style volume pill.
@@ -69,6 +70,8 @@ in one free app:
 - **An EQ wherever there's a volume bar.** Fill out a display's thin speakers, take the boom out of a
   MacBook's, bring a podcast's voices forward or warm up your mic: every speaker, app and mic has its
   own five-band EQ, named for what each band does rather than its frequency.
+- **Effects for apps and mics.** Reverb, echo, a compressor, a limiter, pitch, distortion and voice
+  isolation are built in, and any Audio Unit plug-in on your Mac works too.
 - **Made for calls and streams.** Quiet Apps in Calls lowers or mutes everything else while an app
   uses the mic, Mute Mics has its own shortcut, you can see which apps are listening, and Hear
   Yourself plays your mic in your headphones.
@@ -93,15 +96,16 @@ in one free app:
 | Saved setups | ✓ | ✓ | — ³ | — |
 | Installs a system audio add-on for app volumes | No | Yes | No | Yes |
 | EQ | ✓ | ✓ | ✓ | — |
-| Audio effects (reverb, compressors, plug-ins) | — | ✓ | — | — |
+| Audio effects (reverb, compressors, plug-ins) | ✓ ⁴ | ✓ | — | — |
 
 — means the app doesn't offer it, as far as its own site and docs say (checked November 2026).
 ¹ Rogue Amoeba sells this separately as Loopback ($99).
 ² Background Music can pause your music player when other audio plays.
 ³ FineTune has EQ presets and remembers settings per device.
+⁴ On apps and mics.
 
-Soundcheck's EQ is a five-band one for every speaker, app and mic. It doesn't host audio effects or
-plug-ins; SoundSource does.
+Soundcheck's EQ is a five-band one for every speaker, app and mic. Apps and mics can also have
+effects: Soundcheck's own, or Audio Unit plug-ins.
 
 ## Features
 
@@ -129,7 +133,7 @@ at full. The gaps between them are remembered.
   else up, until you click it again.
 - **Displays and devices without a volume** (most HDMI and DisplayPort monitors) get a real volume
   anyway, and their volume keys work.
-- **Switch to Headphones.** Plug in headphones and everything moves to them, with a pill to say so.
+- **Switch to Headphones.** Plug in headphones and everything moves to them, their microphone too (AirPods, a headset), with a pill to say so. When they go, the speakers and the microphone from before come back.
 - **Every speaker remembers its volume**, across unplugging, restarting and relaunching.
 - **Every speaker in sync.** Bluetooth headphones, HDMI displays and USB speakers each take a
   different time to play what they're given. Soundcheck holds the quicker ones back by the
@@ -180,6 +184,14 @@ icons and names, like Apple's own picker. Its icon shows how many are playing.
   kitchen HomePod while everything else stays on the Mac.
 - **An EQ for each app.** The button beside an app's bar opens its EQ, so you can add bass to your
   music without making a call boomy.
+- **Effects for each app.** The **FX** button next to an app's EQ adds up to four effects after it,
+  one after the other: **Reverb**, **Echo**, **Compressor**, **Limiter**, **Pitch**, **Distortion** and
+  **Voice Isolation** (just the voice in a video, without the noise around it), or any Audio Unit
+  plug-in on your Mac, listed by who makes it. Soundcheck's own have a few plain controls and their
+  presets (Reverb's rooms and halls, say) right in the panel; **Open Window** shows all of an effect's
+  controls, in a plug-in's own design. Click an effect's icon to turn it off without losing how it's
+  set. Other makers' plug-ins run in a process of their own, so one that crashes just goes quiet
+  instead of taking your sound with it.
 - **Pinned Apps** always have a bar, even when they're quiet.
 - **Browser tabs, one by one.** With Soundcheck's extension in Safari, Dia or Chrome, a browser's
   name in the Apps list opens to its tabs that are playing or on a call, each with its favicon, its
@@ -209,6 +221,9 @@ you change it once, in the menu bar, and every app follows.
   the end of its bar to mute it without losing its level.
 - **An EQ for each mic**, inside Soundcheck Mic: *Less Rumble* for a desk mic, *Clear Voices* for a
   laptop's. Every app hears the result.
+- **Effects for each mic** too, with the FX button next to its EQ: *Voice Isolation* to keep just your
+  voice, a *Compressor* to even you out, *Reverb* or *Pitch* for fun, or your own plug-ins. They come
+  after the mic's EQ and Voice Cleanup, and every app hears them.
 - **Hear Yourself** plays your mic in your headphones: turn it on with the headphones button next to
   their EQ, and set how loud under the mic.
 - **Voice Cleanup** (in Options) cuts rumble, quiets the room between your words and evens out your
@@ -228,7 +243,7 @@ The **•••** menu in the panel has three sections, opening one at a time, t
 
 | Option | What it does |
 | --- | --- |
-| Switch to Headphones | Moves all sound to headphones when they're plugged in (on by default) |
+| Switch to Headphones | Moves all sound, and the microphone, to headphones when they connect (on by default) |
 | Night Mode | Evens out loud and quiet parts, so explosions don't wake anyone and dialogue stays clear |
 | Quiet Apps in Calls | While a call rings (FaceTime, or your iPhone through Continuity) or an app is using the mic, lowers every other app, or mutes them, and fades them back after. While it's on, Soundcheck carries the sound whenever something plays, so a call only has to turn things down |
 | Boost Apps | Lets app volumes go past 100%, up to 200% |
@@ -254,7 +269,8 @@ The **•••** menu in the panel has three sections, opening one at a time, t
 | Sound Settings… | Opens macOS's Sound settings |
 
 **Reset** evens out the speakers, puts every app back to full and unmuted, sets every EQ, balance and
-mono flat, unmutes anything muted on its own, and turns Split, Route and Hear Yourself off. For 5
+mono flat, turns every effect off (each stays set up, to turn back on), unmutes anything muted on its
+own, and turns Split, Route and Hear Yourself off. For 5
 seconds after, it's **Undo Reset**.
 
 ### Saved Setups
@@ -277,6 +293,39 @@ Soundcheck adds three actions to the Shortcuts app, so a shortcut, an automation
 
 Say "Apply *Movie* in Soundcheck" to Siri, or run a setup when you join a Wi-Fi network or a Focus
 starts.
+
+### iPhone and iPad: Soundcheck Companion
+
+**Soundcheck Companion** is an app for iPhone and iPad (it's called **Soundcheck** on the Home
+Screen). It isn't screen sharing: it's the whole panel, made for the phone, working on your Mac live.
+
+- **Control everything.** Speakers, Mix, AirPlay, every app's volume, mute, EQ, effects and Split,
+  browser tabs, mics, Route, Hear Yourself and all of the Options, from the couch. A plug-in's own
+  window is only on the Mac; the app shows its main controls.
+- **Play your Mac here.** Your iPhone or iPad becomes one of the Mac's speakers, in sync with the
+  others (AirPlay speakers included). Lock it and the Lock Screen shows your Mac (*MacBook*, on the
+  grey tile Soundcheck shows for System) with play/pause and skip, which work whatever's playing on
+  the Mac. Pick it on the Mac (it's listed with the speakers) or in the app's Speakers tab, where
+  **Timing** under it lines it up with the other speakers by ear if it sounds early or late.
+- **Volume buttons for the Mac.** While the app's open, or the iPhone plays your Mac's sound, its
+  volume buttons turn the Mac up and down: whatever the main bar controls (Speakers, Apps or
+  Mics), the same choice as on the Mac.
+- **Use it as a microphone.** Pick it in Mics (on the Mac, or in the app). The iPhone's microphone
+  goes into Soundcheck Mic as **iPhone (Soundcheck)**, with its own volume, mute, EQ and effects,
+  beside **iPhone (Continuity)** (macOS's Continuity microphone, which Soundcheck now calls that).
+- **Calls on your iPhone.** With Quiet Apps in Calls on, answer a call on your iPhone and the Mac's
+  apps stay down until you hang up (the Mac on its own only knows it rang).
+- **Without opening the app.** *Play Mac Here* and *Play or Pause Mac* go in Control Center, and a
+  Lock Screen and Home Screen widget has play/pause and volume. They're in Shortcuts and Siri too.
+
+The first time, open the app on the same Wi-Fi as your Mac and click **Allow** on the Mac (both show
+the same code). After that it connects by itself, and your iPad on the same Apple Account is allowed
+too, through iCloud Keychain. Manage paired devices in **Options › Soundcheck › iPhone & iPad**.
+
+iOS only lets an app start playing or listening while it's open. When you pick your iPhone as the
+speaker or microphone **on the Mac** while the app is in the background, Soundcheck wakes it over
+Bluetooth and it shows a notification. Tap it and it starts. From the app, Control Center or the
+Lock Screen, it starts straight away.
 
 ### The volume pill
 
@@ -318,7 +367,8 @@ walkthrough lists them all):
 | Accessibility | Taking over the volume keys and showing Soundcheck's volume pill |
 | System Audio Recording | App volumes, EQ, several speakers, AirPlay and routing apps into Soundcheck Mic |
 | Microphone | Carrying your real mic into Soundcheck Mic |
-| Local Network | Finding AirPlay speakers and streaming to them |
+| Local Network | Finding AirPlay speakers and streaming to them, and letting Soundcheck Companion find your Mac |
+| Bluetooth | Waking Soundcheck Companion on a paired iPhone or iPad (only asked once you've paired one) |
 
 Adding **Soundcheck Mic** asks for your password once, because it installs a small audio driver in
 `/Library/Audio/Plug-Ins/HAL`. Your sound pauses for a second while macOS loads it.

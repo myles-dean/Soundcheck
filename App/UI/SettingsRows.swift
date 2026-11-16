@@ -126,6 +126,15 @@ struct SettingsRows: View {
                 .foregroundStyle(.secondary)
         }
         .help("Add Soundcheck's extension to Safari, Dia and Chrome, for each tab's own volume")
+        HoverRow(action: { CompanionsWindowController.shared.show() }) {
+            IconCircle(symbol: "iphone", isOn: !CompanionHub.shared.connected.isEmpty)
+            Text("iPhone & iPad").font(.system(size: 13))
+            Spacer(minLength: 0)
+            Image(systemName: "arrow.up.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .help("Control Soundcheck from Soundcheck Companion on your iPhone or iPad, play on it, or use its microphone")
     }
 
     private func setLaunchAtLogin(_ on: Bool) {

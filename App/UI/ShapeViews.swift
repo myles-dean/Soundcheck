@@ -32,6 +32,7 @@ struct ShapeButton: View {
             withAnimation(.easeInOut(duration: PanelController.animationDuration)) {
                 state.shaping = open ? nil : spot
                 state.hearing = nil
+                state.effecting = nil
             }
         } label: {
             // The letters read better at this size than a sliders glyph does.
@@ -102,6 +103,7 @@ struct HearYourselfButton: View {
         withAnimation(.easeInOut(duration: PanelController.animationDuration)) {
             state.hearing = state.hearing == spot ? nil : spot
             state.shaping = nil
+            state.effecting = nil
         }
     }
 }
@@ -154,7 +156,7 @@ struct HearYourselfPicker: View {
 }
 
 /// A volume bar with the EQ button to its left (and for one of the Mac's speakers, the Hear
-/// Yourself button), and the EQ opening under it.
+/// Yourself button; for a microphone, the FX button), and the EQ (or effects) opening under it.
 struct ShapedBar<Bar: View>: View {
     /// What the EQ changes: one speaker, app or mic, or (the main bar with Mix off) every speaker
     /// in use, all at once.
@@ -184,6 +186,13 @@ struct ShapedBar<Bar: View>: View {
 
     private var spot: EQSpot? { targets.first.map { EQSpot(target: $0, place: place) } }
 
+    /// One app or microphone (not speakers): it has effects too.
+    private var effectsTarget: AudioEngine.ShapeTarget? {
+        guard targets.count == 1, let target = targets.first else { return nil }
+        if case .speaker = target { return nil }
+        return target
+    }
+
     var body: some View {
         let hearable = devices.filter { AudioEngine.shared.canHearYourself(on: $0) }
         VStack(alignment: .leading, spacing: 6) {
@@ -194,6 +203,9 @@ struct ShapedBar<Bar: View>: View {
                 if !hearable.isEmpty {
                     HearYourselfButton(devices: hearable, spot: spot)
                 }
+                if let effectsTarget {
+                    EffectsButton(target: effectsTarget, name: name)
+                }
                 bar
             }
             if let spot, state.shaping == spot {
@@ -202,6 +214,10 @@ struct ShapedBar<Bar: View>: View {
             }
             if let spot, state.hearing == spot, !hearable.isEmpty {
                 HearYourselfPicker(devices: hearable)
+                    .transition(.opacity)
+            }
+            if let effectsTarget, state.effecting == effectsTarget {
+                EffectsPanel(target: effectsTarget, name: name)
                     .transition(.opacity)
             }
         }

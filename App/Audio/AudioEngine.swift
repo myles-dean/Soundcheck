@@ -119,10 +119,13 @@ final class AudioEngine {
     var knobValue: Float {
         switch knob {
         case .speakers: outputLevels.top(speakerKeys)
-        case .apps: appLevels.top(playingApps.map(\.id))
+        case .apps: appLevels.top(knobApps)
         case .mics: micLevels.top(activeMics.map(\.uid))
         }
     }
+    /// The apps the main bar and the volume keys move on Apps: the ones the list (and the volume
+    /// pill) shows, so the bar is the loudest of those, not just of the ones playing this moment.
+    var knobApps: [String] { visibleApps.map(\.id) }
     /// The loudest speaker in use.
     var speakersVolume: Float { outputLevels.top(speakerKeys) }
     /// A microphone's level, or nil when it can't be set from the Mac.
@@ -327,6 +330,8 @@ final class AudioEngine {
         // Soundcheck's own audio IO mustn't keep the Mac awake.
         HAL.write(.system, kAudioHardwarePropertySleepingIsAllowed, value: UInt32(1))
         loadSettings()
+        // Before any taps: apps with effects get taps of their own.
+        Effects.shared.load()
         systemListeners = [
             HALListener(.system, kAudioHardwarePropertyDevices) { [weak self] in self?.devicesChanged() },
             HALListener(.system, kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in self?.defaultOutputChanged() },
@@ -493,7 +498,7 @@ final class AudioEngine {
         reply?(code?.trimmingCharacters(in: .whitespaces).isEmpty == false ? code : nil)
     }
 
-    @ObservationIgnored private var airPlaySessions: [String: AirPlaySession] = [:]
+    @ObservationIgnored private var airPlaySessions: [String: any SpeakerSession] = [:]
     @ObservationIgnored private var mainMixer: MainMixer?
     @ObservationIgnored private var mainMixerSilent = false
     @ObservationIgnored private let airPlayTimeline = AirPlayTimeline()
@@ -507,7 +512,10 @@ final class AudioEngine {
             airPlayStates[id] = nil
         }
         for speaker in activeAirPlay where airPlaySessions[speaker.id] == nil {
-            let session = AirPlaySession(speaker: speaker, timeline: airPlayTimeline)
+            // A companion (an iPhone or iPad) plays the same mix on the same timeline.
+            let session: any SpeakerSession = speaker.isCompanion
+                ? CompanionSpeakerSession(speaker: speaker, timeline: airPlayTimeline)
+                : AirPlaySession(speaker: speaker, timeline: airPlayTimeline)
             session.allowsPTP = !airPlayWithoutPTP.contains(speaker.id)
             airPlaySessions[speaker.id] = session
             airPlayStates[speaker.id] = .connecting
@@ -616,6 +624,10 @@ final class AudioEngine {
         mixer.setDelay(seconds: slowest)
     }
 
+    /// A companion speaker's own delay changed (headphones on the iPhone, say): everything lines
+    /// up with it again.
+    func companionLatencyChanged() { feedAirPlay() }
+
     /// How much earlier (seconds) an AirPlay speaker gets the sound, so it lines up with the
     /// others. AirPlay speakers add their own processing delay on top of AirPlay's buffer, and
     /// it differs by model, so it's set by ear.
@@ -672,7 +684,7 @@ final class AudioEngine {
             outputLevels.setTop(value, speakerKeys)
             if isMuted && value > 0 { isMuted = false }
         case .apps:
-            appLevels.setTop(value, playingApps.map(\.id))
+            appLevels.setTop(value, knobApps)
         case .mics:
             micLevels.setTop(value, activeMics.map(\.uid))
             applyMicVolumes()
@@ -681,13 +693,16 @@ final class AudioEngine {
     }
 
     /// A volume key: everything in the group the main slider controls moves by the same amount.
-    func step(_ delta: Float) {
+    func step(_ delta: Float) { step(delta, knob: knob) }
+
+    /// A step for one group, whatever the main slider controls (a companion's volume buttons).
+    func step(_ delta: Float, knob: Knob) {
         switch knob {
         case .speakers:
             if isMuted { isMuted = false }
             outputLevels.step(delta, speakerKeys)
         case .apps:
-            appLevels.step(delta, playingApps.map(\.id))
+            appLevels.step(delta, knobApps)
         case .mics:
             micLevels.step(delta, activeMics.map(\.uid))
             applyMicVolumes()
@@ -812,6 +827,7 @@ final class AudioEngine {
         appLevels.hasOwnLevel(id) || mutedApps.contains(id) || isRouted(id)
             || (allowBoost && (boosts[id] ?? 1) > 1.001)
             || appShapes[id]?.hasEQ == true
+            || Effects.shared.isActive(.app(id))
             || (duckFactor < 0.999 && (callApps.contains(id) || duckExempt.contains(id)))
     }
 
@@ -844,6 +860,8 @@ final class AudioEngine {
 
     // MARK: Quiet Apps in Calls
 
+    @ObservationIgnored private var wasRinging = false
+
     /// Apps using a microphone (on a call); they're never ducked. While a call rings, System (which
     /// plays the ringtone) isn't either.
     var callApps: Set<String> {
@@ -855,7 +873,19 @@ final class AudioEngine {
         return ids
     }
     /// On a call (an app using a microphone, or a browser tab on one), or one ringing.
-    var onCall: Bool { monitor.isRinging || apps.contains(where: \.isListening) || !BrowserTabs.shared.callBrowsers.isEmpty }
+    var onCall: Bool {
+        monitor.isRinging || apps.contains(where: \.isListening) || !BrowserTabs.shared.callBrowsers.isEmpty
+            || CompanionHub.shared.holdsCall
+    }
+    /// The Mac is ringing (a call to the iPhone, through Continuity).
+    var isRinging: Bool { monitor.isRinging }
+
+    /// A call answered on a paired iPhone started or ended (or it's said whether the call the
+    /// Mac stopped ringing for was answered there).
+    func phoneCallChanged() {
+        syncTaps()
+        updateDucking()
+    }
 
     /// A browser tab joined or left a call.
     func browserCallsChanged() {
@@ -952,6 +982,9 @@ final class AudioEngine {
     /// What was playing where before headphones took over, to go back to when they disconnect.
     /// Forgotten if you change the outputs meanwhile.
     @ObservationIgnored private var beforeHeadphones: (members: [String], split: Bool, headphones: String)?
+    /// The microphone in use before the headphones' own took over (and Route's microphones), to
+    /// give back when they disconnect; nil if the microphone wasn't switched.
+    @ObservationIgnored private var micBeforeHeadphones: (headphones: String, selected: String?, routeMics: [String])?
 
     /// Headphones appeared (or were plugged into the Mac): everything plays through them.
     private func switchToHeadphonesIfNew(_ device: AudioDevice) -> Bool {
@@ -963,14 +996,86 @@ final class AudioEngine {
             HAL.write(.system, kAudioHardwarePropertyDefaultOutputDevice, value: device.id)
         }
         outputsChanged()
+        switchMicrophoneToHeadphones(device)
         onHeadphones?()
         return true
+    }
+
+    /// Headphones with a microphone of their own (AirPods, a headset): it becomes the microphone
+    /// too. A Bluetooth headset's microphone can show up a moment after its speaker, so it's
+    /// looked for again shortly. The Mac's own jack needs nothing: its microphone input switches
+    /// to the headset's by itself.
+    private func switchMicrophoneToHeadphones(_ headphones: AudioDevice, again: Bool = true) {
+        guard headphones.transport != kAudioDeviceTransportTypeBuiltIn else { return }
+        let inputs = AudioDevice.list(.input)
+        guard let microphone = Self.headphoneMicrophone(for: headphones, in: inputs) else {
+            if again {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self, self.beforeHeadphones?.headphones == headphones.uid else { return }
+                    self.switchMicrophoneToHeadphones(headphones, again: false)
+                }
+            }
+            return
+        }
+        inputDevices = inputs
+        // Route with several microphones is a setup made on purpose: it's left as it is.
+        if isRouting && usesSoundcheckMic && routeMics.count > 1 { return }
+        let current = usesSoundcheckMic ? (isRouting ? routeMics.first : shownInput?.uid) : defaultInput?.uid
+        guard current != microphone.uid else { return }
+        let before = (headphones.uid, usesSoundcheckMic ? selectedMicUID : defaultInput?.uid, routeMics)
+        if isRouting && usesSoundcheckMic {
+            routeMics = [microphone.uid]
+            refreshInput()
+            rebuildMixer()
+            save()
+        } else {
+            selectInput(microphone)
+        }
+        micBeforeHeadphones = before
+        log.notice("Headphones: microphone switched to \(microphone.name, privacy: .public)")
+    }
+
+    /// The headphones' own microphone: the same device, or one with the same Bluetooth address
+    /// (its UID before the ":input" / ":output" suffix) or the same name.
+    static func headphoneMicrophone(for headphones: AudioDevice, in inputs: [AudioDevice]) -> AudioDevice? {
+        func base(_ uid: String) -> String {
+            for suffix in [":output", ":input", "-output", "-input"] where uid.hasSuffix(suffix) { return String(uid.dropLast(suffix.count)) }
+            return uid
+        }
+        let candidates = inputs.filter { $0.uid != MicDriver.microphoneUID }
+        return candidates.first { $0.uid == headphones.uid }
+            ?? candidates.first { base($0.uid) == base(headphones.uid) }
+            ?? candidates.first { $0.name == headphones.name && $0.transport == headphones.transport }
+    }
+
+    /// The headphones went away: the microphone from before comes back, unless another was
+    /// picked meanwhile.
+    private func restoreMicrophoneAfterHeadphones(_ headphones: String) {
+        guard let before = micBeforeHeadphones, before.headphones == headphones else { return }
+        micBeforeHeadphones = nil
+        let inputs = AudioDevice.list(.input)
+        if usesSoundcheckMic {
+            if isRouting {
+                // Only if Route still has just the headphones' microphone (now gone).
+                if routeMics.count <= 1 && routeMics.allSatisfy({ uid in !inputs.contains { $0.uid == uid } }) {
+                    routeMics = before.routeMics
+                }
+            } else if let selected = before.selected, !inputs.contains(where: { $0.uid == selectedMicUID }) {
+                selectedMicUID = selected
+            }
+            refreshInput()
+            rebuildMixer()
+            save()
+        } else if let selected = before.selected, let device = inputs.first(where: { $0.uid == selected }), HAL.defaultInput != device.id {
+            HAL.write(.system, kAudioHardwarePropertyDefaultInputDevice, value: device.id)
+        }
     }
 
     /// The headphones went away: back to what was playing before, if nothing was changed since.
     private func restoreAfterHeadphones() -> Bool {
         guard let before = beforeHeadphones else { return false }
         beforeHeadphones = nil
+        restoreMicrophoneAfterHeadphones(before.headphones)
         let restored = before.members.compactMap { uid in outputDevices.first { $0.uid == uid } }
         guard let first = restored.first else { return false }
         members = restored
@@ -1013,16 +1118,17 @@ final class AudioEngine {
 
     /// Options › Reset: Route off and back to one microphone, Split off, Mix closed with every
     /// speaker at the loudest one's level, every app back to full (unmuted, no boost), every EQ,
-    /// balance and mono flat, Hear Yourself off, nothing muted on its own, and the main slider back
-    /// on Speakers. Headphones' volume limits stay (they're for your ears). It can be undone for 5
-    /// seconds.
+    /// balance and mono flat, every effect off (still set up, to turn back on), Hear Yourself off,
+    /// nothing muted on its own, and the main slider back on Speakers. Headphones' volume limits
+    /// stay (they're for your ears). It can be undone for 5 seconds.
     func reset() {
         resetSnapshot = ResetSnapshot(
             isRouting: isRouting, routeMics: routeMics, routedApps: routedApps, isSplit: isSplit, routes: routes,
             appLevels: appLevels, boosts: boosts, mutedApps: mutedApps, mixRequested: mixRequested, knob: knob,
             outputLevels: outputLevels, mutedSpeakers: mutedSpeakers, mutedMics: mutedMics, mutedRouteApps: mutedRouteApps,
             speakerShapes: speakerShapes, appShapes: appShapes, micShapes: micShapes,
-            hearYourselfPicks: hearYourselfPicks, hearYourselfMics: hearYourselfMics, hearYourselfMuted: hearYourselfMuted)
+            hearYourselfPicks: hearYourselfPicks, hearYourselfMics: hearYourselfMics, hearYourselfMuted: hearYourselfMuted,
+            effectsOn: Effects.shared.turnAllOff())
         undoResetUntil = Date().addingTimeInterval(5)
         undoExpiry?.cancel()
         let expiry = DispatchWorkItem { [weak self] in
@@ -1081,6 +1187,7 @@ final class AudioEngine {
         hearYourselfPicks = before.hearYourselfPicks
         hearYourselfMics = before.hearYourselfMics
         hearYourselfMuted = before.hearYourselfMuted
+        Effects.shared.turnOn(before.effectsOn)
         settleAfterReset()
     }
 
@@ -1122,6 +1229,8 @@ final class AudioEngine {
         var hearYourselfPicks: Set<String>
         var hearYourselfMics: [String: [String]]
         var hearYourselfMuted: Bool
+        /// The effects that were on (Reset turns them off, keeping how they're set).
+        var effectsOn: [String: [UUID]]
     }
     @ObservationIgnored private var resetSnapshot: ResetSnapshot?
     @ObservationIgnored private var undoExpiry: DispatchWorkItem?
@@ -1168,6 +1277,7 @@ final class AudioEngine {
     }
 
     func selectInput(_ device: AudioDevice) {
+        micBeforeHeadphones = nil // picked by hand: kept after the headphones go
         if usesSoundcheckMic {
             selectedMicUID = device.uid
             refreshInput()
@@ -1190,7 +1300,7 @@ final class AudioEngine {
     /// (some don't go fully silent at their lowest level), so zero means nothing gets through.
     private func applyMicVolumes() {
         let scope = kAudioObjectPropertyScopeInput
-        for device in feedingMics {
+        for device in feedingMics where !device.isCompanion { // a companion's level is a gain in the mix
             let ownMute = mutedMics.contains(device.uid)
             let canMute = DeviceVolume.canMute(device.id, scope: scope)
             guard settableMics.contains(device.uid) else {
@@ -1230,14 +1340,16 @@ final class AudioEngine {
         for device in feedingMics + hearYourselfOnlyMics {
             let silent = micsMuted || mutedMics.contains(device.uid)
                 || (settableMics.contains(device.uid) && micLevels.value(device.uid) < 0.001)
-            micGain(device.uid).value = silent ? 0 : 1
+            // A companion's microphone has no level of its own to set: its slider is its gain.
+            micGain(device.uid).value = silent ? 0 : (device.isCompanion ? Self.taper(micLevels.value(device.uid)) : 1)
         }
     }
 
     private func refreshInput() {
-        let devices = AudioDevice.list(.input)
-        if devices.map(\.id) != inputDevices.map(\.id) || settableMics.isEmpty {
-            settableMics = Set(devices.filter { DeviceVolume.canSet($0.id, scope: kAudioObjectPropertyScopeInput) }.map(\.uid))
+        // Companions' microphones go into Soundcheck Mic, so they're only listed with it.
+        let devices = AudioDevice.list(.input) + (usesSoundcheckMic ? CompanionMics.devices : [])
+        if devices.map(\.uid) != inputDevices.map(\.uid) || devices.map(\.id) != inputDevices.map(\.id) || settableMics.isEmpty {
+            settableMics = Set(devices.filter { $0.isCompanion || DeviceVolume.canSet($0.id, scope: kAudioObjectPropertyScopeInput) }.map(\.uid))
         }
         inputDevices = devices
         defaultInput = AudioDevice(id: HAL.defaultInput)
@@ -1255,7 +1367,7 @@ final class AudioEngine {
         activeMicUIDs = Set(mics.map(\.uid))
         if !newlyActive.isEmpty { applyMicVolumes() }
         if micsMuted { muteMicrophones(true) } // ones plugged in while muted
-        inputListeners = mics.compactMap { device in
+        inputListeners = mics.filter { !$0.isCompanion }.compactMap { device in
             HALListener(device.id, kAudioHardwareServiceDeviceProperty_VirtualMainVolume, scope: scope) { [weak self] in
                 guard let self, !self.recentlyWritten(device.uid),
                       let volume = DeviceVolume.get(device.id, scope: scope),
@@ -1265,6 +1377,39 @@ final class AudioEngine {
                 self.micLevels.set(volume, for: device.uid)
                 NotificationCenter.default.post(name: Self.didChangeVolume, object: nil)
             }
+        }
+    }
+
+    // MARK: Companions' microphones
+
+    /// A companion paired, connected or left: its microphone comes and goes from the list.
+    func companionsChanged() {
+        let before = inputDevices.map(\.uid)
+        refreshInput()
+        if before != inputDevices.map(\.uid) { rebuildMixer() }
+    }
+
+    /// The microphone picked before a companion's, to go back to when it's turned off there.
+    @ObservationIgnored private var micBeforeCompanion: String?
+
+    /// "Use as Microphone" on a companion: its microphone becomes the one Soundcheck Mic carries
+    /// (or joins Route's), and turning it off goes back to the one from before.
+    func useCompanionMicrophone(_ device: String, _ on: Bool) {
+        guard usesSoundcheckMic else { return }
+        let uid = CompanionMics.uid(device)
+        refreshInput()
+        guard let microphone = inputDevices.first(where: { $0.uid == uid }) else { return }
+        if isRouting {
+            if routeMics.contains(uid) != on { toggleRouteMic(microphone) }
+        } else if on {
+            guard shownInput?.uid != uid else { return }
+            let before = shownInput?.uid
+            selectInput(microphone)
+            micBeforeCompanion = before
+        } else if shownInput?.uid == uid {
+            let back = micBeforeCompanion.flatMap { saved in inputDevices.first { $0.uid == saved } }
+                ?? inputDevices.first { !$0.isCompanion }
+            if let back { selectInput(back) }
         }
     }
 
@@ -1281,6 +1426,7 @@ final class AudioEngine {
     }
 
     func toggleRouteMic(_ device: AudioDevice) {
+        micBeforeHeadphones = nil
         if let index = routeMics.firstIndex(of: device.uid) { routeMics.remove(at: index) } else { routeMics.append(device.uid) }
         rebuildMixer()
         refreshInput()
@@ -1338,6 +1484,17 @@ final class AudioEngine {
     @ObservationIgnored private var watchedMicrophone = AudioObjectID.unknown
     @ObservationIgnored private var microphoneInUse = false
     @ObservationIgnored private var metering = false
+    /// App meters only (no microphones), for companions: what's really making sound right now.
+    @ObservationIgnored private var appMetering = false
+
+    func setAppMetering(_ on: Bool) {
+        guard on != appMetering else { return }
+        appMetering = on
+        updateAppMeters()
+    }
+
+    /// An app's meter, if it has one (whether or not it's muted here).
+    func appMeterLevel(_ id: String) -> Float? { appMeters[id]?.level }
 
     private func watchMicrophoneUse() {
         let microphone = HAL.device(forUID: MicDriver.microphoneUID)
@@ -1376,6 +1533,8 @@ final class AudioEngine {
     /// Builds Soundcheck Mic's mix off the main thread: opening a microphone can take a moment,
     /// and the panel (which asks for the level) shouldn't wait for it.
     private func rebuildMixer() {
+        // Companions whose microphone is picked keep it on (and send it).
+        CompanionHub.shared.wantMicrophones(Set((feedingMics + hearYourselfOnlyMics).compactMap { CompanionMics.device(fromUID: $0.uid) }))
         mixerGeneration += 1
         let generation = mixerGeneration
         let old = mixer
@@ -1387,8 +1546,10 @@ final class AudioEngine {
         let routed = isRouting ? apps.filter { routedApps.contains($0.id) } : []
         let appSources = routed.map { (id: $0.id, processes: $0.objects, gain: routeGain($0.id)) }
         // The microphones going into Soundcheck Mic, then any a speaker plays that don't.
-        let microphones = feedingMics.map { (uid: $0.uid, gain: micGain($0.uid), shape: shapeControl(.mic($0.uid)), feeds: true) }
-            + hearYourselfOnlyMics.map { (uid: $0.uid, gain: micGain($0.uid), shape: shapeControl(.mic($0.uid)), feeds: false) }
+        let microphones = feedingMics.map { (uid: $0.uid, gain: micGain($0.uid), shape: shapeControl(.mic($0.uid)),
+                                             effects: Effects.shared.control(for: .mic($0.uid)), feeds: true) }
+            + hearYourselfOnlyMics.map { (uid: $0.uid, gain: micGain($0.uid), shape: shapeControl(.mic($0.uid)),
+                                          effects: Effects.shared.control(for: .mic($0.uid)), feeds: false) }
         let monitor = monitorTargets.isEmpty || microphones.isEmpty ? nil
             : MicMixer.Monitor(outputs: monitorTargets.map { (uid: $0.uid, gain: softwareGain($0.uid), microphones: hearYourselfMics[$0.uid]) },
                                level: monitorGain)
@@ -1471,7 +1632,7 @@ final class AudioEngine {
     private func updateAppMeters() {
         metersGeneration += 1
         let generation = metersGeneration
-        let wanted = metering && AudioCapturePermission.status == .allowed
+        let wanted = (metering || appMetering) && AudioCapturePermission.status == .allowed
             ? Dictionary(uniqueKeysWithValues: routableApps.map { ($0.id, $0.objects) }) : [:]
         var gone: [TapMeter] = []
         for (id, meter) in appMeters where wanted[id] != meter.processes {
@@ -1531,6 +1692,11 @@ final class AudioEngine {
         if let gone = beforeHeadphones?.headphones, !outputDevices.contains(where: { $0.uid == gone }), restoreAfterHeadphones() {
             refreshInput()
             return
+        }
+        // The speakers were changed while the headphones were on, but their microphone was still
+        // in use when they went: the one from before comes back.
+        if let gone = micBeforeHeadphones?.headphones, !outputDevices.contains(where: { $0.uid == gone }) {
+            restoreMicrophoneAfterHeadphones(gone)
         }
         isMicrophoneInstalled = MicDriver.isInstalled
         // Devices can come back with new IDs (after sleep, or reconnecting), so look them up again.
@@ -1642,6 +1808,9 @@ final class AudioEngine {
     }
 
     private func processesChanged() {
+        let ringingBefore = wasRinging
+        wasRinging = monitor.isRinging
+        if ringingBefore != monitor.isRinging { CompanionHub.shared.ringingChanged(monitor.isRinging) }
         let routedBefore = apps.filter { routedApps.contains($0.id) }.flatMap(\.objects)
         let appsBefore = Set(apps.map(\.id))
         let activeBefore = activeOutputs.map(\.uid)
@@ -1655,7 +1824,7 @@ final class AudioEngine {
         }
         if isRouting && routedBefore != apps.filter({ routedApps.contains($0.id) }).flatMap(\.objects) { rebuildMixer() }
         updateDucking()
-        if metering { updateAppMeters() }
+        if metering || appMetering { updateAppMeters() }
         _ = appsBefore
         let active = isPlaying || isListening
         if active != wasActive {
@@ -1786,7 +1955,7 @@ final class AudioEngine {
             let gains = gains(for: id)
             gains.gain.value = appGain(id)
             if let tap = makeTap(.processes(want.app.objects), outputs: want.outputs, gain: gains.gain, muted: gains.muted,
-                                 shape: shapeControl(.app(id))) {
+                                 shape: shapeControl(.app(id)), effects: Effects.shared.control(for: .app(id))) {
                 appTaps[id] = tap
             }
         }
@@ -1832,6 +2001,7 @@ final class AudioEngine {
             let gains = gains(for: app.id)
             gains.gain.value = appGain(app.id)
             sources.append(.init(tap: .processes(app.objects), gain: gains.gain, muted: gains.muted, shape: shapeControl(.app(app.id)),
+                                 effects: Effects.shared.control(for: .app(app.id)),
                                  airPlay: airPlay.compactMap { slots.firstIndex(of: $0) }))
             claimed += app.objects
         }
@@ -1927,9 +2097,10 @@ final class AudioEngine {
     }
 
     private func makeTap(_ source: TapPlayer.Source, outputs: [TapOutput], gain: SharedValue, muted: SharedValue,
-                         shape: ShapeControl?) -> TapPlayer? {
+                         shape: ShapeControl?, effects: EffectControl? = nil) -> TapPlayer? {
         do {
-            let tap = try TapPlayer(source: source, outputs: outputs, gain: gain, muted: muted, shape: shape, night: nightFlag)
+            let tap = try TapPlayer(source: source, outputs: outputs, gain: gain, muted: muted, shape: shape, effects: effects,
+                                    night: nightFlag)
             needsPermission = false
             return tap
         } catch let error as HALError {
@@ -1982,6 +2153,12 @@ final class AudioEngine {
         default: break
         }
         save()
+    }
+
+    /// An effect was added, removed, or turned on or off: an app with an effect that's on needs a
+    /// tap of its own (and one without may not any more).
+    func effectsChanged() {
+        syncTaps()
     }
 
     private func shapeControl(_ target: ShapeTarget) -> ShapeControl {

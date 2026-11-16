@@ -4,6 +4,7 @@ options:
   bundleIdPrefix: com.mylesdean
   deploymentTarget:
     macOS: "26.0"
+    iOS: "26.0"
   createIntermediateGroups: true
 packages:
   # Updates for copies installed from the DMG (Homebrew installs update through brew).
@@ -16,8 +17,8 @@ settings:
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: Apple Development
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "1.1"
-    CURRENT_PROJECT_VERSION: "3"
+    MARKETING_VERSION: "1.2"
+    CURRENT_PROJECT_VERSION: "4"
     ENABLE_HARDENED_RUNTIME: YES
     ENABLE_USER_SCRIPT_SANDBOXING: YES
     DEAD_CODE_STRIPPING: YES
@@ -28,6 +29,8 @@ targets:
     scheme: {}
     sources:
       - App
+      # Shared with the companion app (the EQ's model, and the link between the two).
+      - Shared
       # The Chrome-based browsers' extension (Dia, Chrome, Edge, Brave, Arc), copied to Application
       # Support at launch for "Load unpacked".
       - path: Extension/Shared
@@ -69,10 +72,13 @@ targets:
         # puts behind the "System Audio Recording" permission.
         NSAudioCaptureUsageDescription: Soundcheck sets each app's volume, plays through several speakers and AirPlay, and routes apps into Soundcheck Mic by passing their sound through at the level you choose. Nothing is recorded or saved.
         # AirPlay speakers are found and streamed to over the local network.
-        NSLocalNetworkUsageDescription: Soundcheck finds AirPlay speakers on your network and plays your Mac's sound on the ones you choose.
+        NSLocalNetworkUsageDescription: Soundcheck finds AirPlay speakers on your network and plays your Mac's sound on the ones you choose, and lets Soundcheck Companion on your iPhone or iPad find your Mac.
         NSBonjourServices:
           - _raop._tcp
           - _airplay._tcp
+          - _soundcheck._tcp
+        # Waking Soundcheck Companion on a paired iPhone or iPad while it's in the background.
+        NSBluetoothAlwaysUsageDescription: Soundcheck wakes Soundcheck Companion on your iPhone or iPad when you pick it as a speaker or microphone, and to keep the sound down while you're on a call on your iPhone.
         # Soundcheck Mic carries the microphone you choose (mixed with apps, with Route).
         NSMicrophoneUsageDescription: Soundcheck carries the microphone you choose into Soundcheck Mic (mixed with the apps you route), so every app hears it without changing its own microphone. Nothing is recorded or saved.
     entitlements:
@@ -142,6 +148,19 @@ targets:
         WRAPPER_EXTENSION: driver
         INFOPLIST_FILE: Driver/Info.plist
         SKIP_INSTALL: YES
+  # A stand-in Soundcheck for testing the companion app without touching the Mac's sound.
+  CompanionTest:
+    type: tool
+    platform: macOS
+    scheme: {}
+    sources:
+      - Tools/CompanionTest
+      - Shared
+    settings:
+      base:
+        PRODUCT_NAME: CompanionTest
+        PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck.CompanionTest
+        SKIP_INSTALL: YES
   # Command-line check of the AirPlay sender: `AirPlayTest list`, `AirPlayTest tone "<name>"`.
   AirPlayTest:
     type: tool
@@ -154,4 +173,103 @@ targets:
       base:
         PRODUCT_NAME: AirPlayTest
         PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck.AirPlayTest
+        SKIP_INSTALL: YES
+  # Soundcheck Companion, for iPhone and iPad: controls Soundcheck on a Mac, plays the Mac's sound
+  # as one of its speakers, and can be its microphone. On the App Store as "Soundcheck Companion";
+  # "Soundcheck" on the Home Screen.
+  SoundcheckCompanion:
+    type: application
+    platform: iOS
+    scheme: {}
+    sources:
+      - Companion/App
+      - Companion/Intents
+      - Shared
+      - path: App/AppIcon.icon
+    dependencies:
+      - target: SoundcheckCompanionWidgets
+        embed: true
+    info:
+      path: Companion/App/Info.plist
+      properties:
+        CFBundleDisplayName: Soundcheck
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleIconName: AppIcon
+        LSApplicationCategoryType: public.app-category.music
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Playing the Mac's sound (and its microphone) with the app in the background, and the
+        # Bluetooth link the Mac wakes it with.
+        UIBackgroundModes:
+          - audio
+          - bluetooth-central
+        NSLocalNetworkUsageDescription: Soundcheck finds your Mac on your network, to control Soundcheck there and play its sound here.
+        NSBonjourServices:
+          - _soundcheck._tcp
+        NSMicrophoneUsageDescription: Soundcheck sends this microphone to your Mac when you use it as your Mac's microphone. Nothing is recorded or saved.
+        NSBluetoothAlwaysUsageDescription: Your Mac uses Bluetooth to wake Soundcheck when you pick this device as a speaker or microphone there, or to keep its sound down while you're on a call.
+    entitlements:
+      path: Companion/App/Companion.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.mylesdean.Soundcheck.Companion
+        com.apple.developer.usernotifications.time-sensitive: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck.Companion
+        PRODUCT_NAME: Soundcheck Companion
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "2"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: $(inherited) COMPANION_APP
+        ENABLE_HARDENED_RUNTIME: NO
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+  # Control Center controls and Lock Screen / Home Screen widgets for the companion.
+  SoundcheckCompanionWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - Companion/Widgets
+      - Companion/Intents
+    dependencies:
+      - sdk: WidgetKit.framework
+      - sdk: SwiftUI.framework
+    info:
+      path: Companion/Widgets/Info.plist
+      properties:
+        CFBundleDisplayName: Soundcheck
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    entitlements:
+      path: Companion/Widgets/Widgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.mylesdean.Soundcheck.Companion
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.mylesdean.Soundcheck.Companion.Widgets
+        PRODUCT_NAME: SoundcheckCompanionWidgets
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "2"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: Apple Development
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ENABLE_HARDENED_RUNTIME: NO
         SKIP_INSTALL: YES

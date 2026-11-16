@@ -85,14 +85,20 @@ final class TapPlayer {
     private var night: UnsafeMutablePointer<Compressor>?
     /// Each output buffer's shape, then the app's (kept alive for the audio thread).
     private let shapeSources: [ShapeControl]
+    /// The app's effects, after its EQ (kept alive here; the audio thread doesn't retain it).
+    private let keepEffects: EffectControl?
+    private unowned(unsafe) let effects: EffectControl?
+    private var sampleRate: Double = 0
 
     /// - Parameters:
     ///   - outputs: the devices to play through (the first one is the clock), each with its
     ///     software gain (1 when the device's own volume does the job).
     ///   - gain: the tap's own level (an app's volume); `muted` is 1 when muted.
     ///   - shape: the app's own EQ (none for everything else).
+    ///   - effects: the app's own effects, after its EQ (none for everything else).
     ///   - night: Night Mode (1: on), which evens out the tapped sound.
-    init(source: Source, outputs: [TapOutput], gain: SharedValue, muted: SharedValue, shape: ShapeControl?, night: SharedValue) throws {
+    init(source: Source, outputs: [TapOutput], gain: SharedValue, muted: SharedValue, shape: ShapeControl?,
+         effects: EffectControl? = nil, night: SharedValue) throws {
         guard let clock = outputs.first?.uid else { throw HALError(status: kAudioHardwareBadDeviceError, what: "find an output") }
         self.source = source
         outputUIDs = outputs.map(\.uid)
@@ -107,6 +113,8 @@ final class TapPlayer {
         tapDescription.muteBehavior = .mutedWhenTapped
 
         gainValues = [gain, muted, night] + outputs.map(\.gain)
+        keepEffects = effects
+        self.effects = effects
         nightOn = night.pointer
         scratch = .allocate(capacity: Self.maxFrames * 2)
         scratch.initialize(repeating: 0, count: Self.maxFrames * 2)
@@ -163,6 +171,8 @@ final class TapPlayer {
                   format.mBitsPerChannel == 32, format.mSampleRate > 0
             else { throw HALError(status: kAudioDeviceUnsupportedFormatError, what: "use the output's format") }
             ramp = 1 - exp(-1 / (Float(format.mSampleRate) * 0.02)) // ~20 ms smoothing, no clicks
+            sampleRate = format.mSampleRate
+            effects?.prepare(sampleRate: format.mSampleRate)
             let dsps = UnsafeMutablePointer<ShapeDSP>.allocate(capacity: bufferCount)
             for index in 0..<bufferCount {
                 (dsps + index).initialize(to: ShapeDSP(control: shapeSources[index], sampleRate: format.mSampleRate))
@@ -316,6 +326,7 @@ final class TapPlayer {
                 scratch[frame * 2 + 1] = inChannels > 1 ? source[frame * inChannels + 1] : left
             }
             sourceShape?.pointee.process(scratch, frames: inFrames, channels: 2)
+            effects?.process(scratch, frames: inFrames, sampleRate: sampleRate)
             night?.pointee.process(scratch, frames: inFrames, channels: 2, on: nightOn.pointee > 0.5)
         }
 

@@ -226,8 +226,12 @@ struct SoundPanelView: View {
     /// AirPlay: one row whose icon is how many AirPlay speakers are on, opening to the speakers on
     /// the network (Soundcheck streams to them itself, in sync with the regular speakers).
     private var airPlayGroup: some View {
-        let count = engine.activeAirPlay.count
+        let count = engine.activeAirPlay.filter { !$0.isCompanion }.count
         return VStack(spacing: 2) {
+            // iPhones and iPads with Soundcheck Companion, above AirPlay (they play the same way).
+            ForEach(AirPlayBrowser.shared.speakers.filter(\.isCompanion)) { speaker in
+                airPlayRow(speaker)
+            }
             HoverRow(action: {
                 AirPlayBrowser.shared.start()
                 withAnimation(expand) { state.airPlayOpen.toggle() }
@@ -252,7 +256,7 @@ struct SoundPanelView: View {
             }
             if state.airPlayOpen {
                 VStack(spacing: 2) {
-                    let speakers = AirPlayBrowser.shared.speakers
+                    let speakers = AirPlayBrowser.shared.speakers.filter { !$0.isCompanion }
                     if let problem = AirPlayBrowser.shared.problem, speakers.isEmpty {
                         Button {
                             if AirPlayBrowser.shared.isDenied {
@@ -278,47 +282,55 @@ struct SoundPanelView: View {
                             .padding(.vertical, 4)
                     }
                     ForEach(speakers) { speaker in
-                        let isOn = engine.airPlayIDs.contains(speaker.id)
-                        // Laid out like the Mac's speakers above, the full width of the list.
-                        HoverRow(action: { withAnimation(expand) { engine.toggleAirPlay(speaker) } }) {
-                            IconCircle(symbol: speaker.symbol, isOn: isOn)
-                            VStack(alignment: .leading, spacing: 0) {
-                                Text(speaker.name).font(.system(size: 13)).lineLimit(1)
-                                switch engine.airPlayStates[speaker.id] {
-                                case .connecting:
-                                    Text("Connecting…").font(.system(size: 10)).foregroundStyle(.secondary)
-                                case .failed:
-                                    Text("Couldn't connect").font(.system(size: 10)).foregroundStyle(.red)
-                                default:
-                                    EmptyView()
-                                }
-                            }
-                            Spacer(minLength: 0)
-                            Checkmark(isOn: isOn)
-                        }
-                        // Mix: its own bar under it, as for the Mac's speakers.
-                        if isOn && engine.isMixing && engine.activeAirPlay.contains(where: { $0.id == speaker.id }) {
-                            ShapedBar(target: .speaker(AudioEngine.airPlayKey(speaker.id)), name: speaker.name) {
-                                let key = AudioEngine.airPlayKey(speaker.id)
-                                let muted = engine.isSpeakerMuted(key)
-                                LevelSlider(value: engine.airPlayVolume(speaker), low: nil,
-                                            mute: MuteControl(isMuted: muted) { engine.setSpeakerMuted(!muted, for: key) },
-                                            onChange: { engine.setAirPlayVolume($0, for: speaker) })
-                            }
-                            .padding(.horizontal, 16) // as wide as the speaker's row
-                            .padding(.bottom, 4)
-                            .transition(.opacity)
-                        }
-                        if engine.airPlayCodeRequest == speaker.id {
-                            AirPlayCodeField(name: speaker.name)
-                                .padding(.leading, 54)
-                                .padding(.trailing, 16)
-                                .transition(.opacity)
-                        }
+                        airPlayRow(speaker)
                     }
                 }
                 .transition(.opacity)
             }
+        }
+    }
+
+    /// One AirPlay speaker (or companion) row, and its bar with Mix.
+    @ViewBuilder
+    private func airPlayRow(_ speaker: AirPlaySpeaker) -> some View {
+        let isOn = engine.airPlayIDs.contains(speaker.id)
+        // Laid out like the Mac's speakers above, the full width of the list.
+        HoverRow(action: { withAnimation(expand) { engine.toggleAirPlay(speaker) } }) {
+            IconCircle(symbol: speaker.symbol, isOn: isOn)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(speaker.name).font(.system(size: 13)).lineLimit(1)
+                let companion = CompanionHub.device(fromSpeakerID: speaker.id)
+                switch engine.airPlayStates[speaker.id] {
+                case .connecting:
+                    Text(companion.flatMap { CompanionHub.shared.notes[$0] } ?? "Connecting…")
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                case .failed(let reason):
+                    Text(companion != nil ? reason : "Couldn't connect").font(.system(size: 10)).foregroundStyle(.red).lineLimit(1)
+                default:
+                    EmptyView()
+                }
+            }
+            Spacer(minLength: 0)
+            Checkmark(isOn: isOn)
+        }
+        // Mix: its own bar under it, as for the Mac's speakers.
+        if isOn && engine.isMixing && engine.activeAirPlay.contains(where: { $0.id == speaker.id }) {
+            ShapedBar(target: .speaker(AudioEngine.airPlayKey(speaker.id)), name: speaker.name) {
+                let key = AudioEngine.airPlayKey(speaker.id)
+                let muted = engine.isSpeakerMuted(key)
+                LevelSlider(value: engine.airPlayVolume(speaker), low: nil,
+                            mute: MuteControl(isMuted: muted) { engine.setSpeakerMuted(!muted, for: key) },
+                            onChange: { engine.setAirPlayVolume($0, for: speaker) })
+            }
+            .padding(.horizontal, 16) // as wide as the speaker's row
+            .padding(.bottom, 4)
+            .transition(.opacity)
+        }
+        if engine.airPlayCodeRequest == speaker.id {
+            AirPlayCodeField(name: speaker.name)
+                .padding(.leading, 54)
+                .padding(.trailing, 16)
+                .transition(.opacity)
         }
     }
 
@@ -659,7 +671,11 @@ private struct AppRow: View {
                     .buttonStyle(.plain)
                     .help(open ? "Hide \(app.name)'s tabs" : "Show \(app.name)'s tabs")
                 }
-                ShapeButton(spot: EQSpot(target: .app(app.id)), name: app.name)
+                // EQ and FX together, as a speaker's EQ and Hear Yourself are.
+                HStack(spacing: 6) {
+                    ShapeButton(spot: EQSpot(target: .app(app.id)), name: app.name)
+                    EffectsButton(target: .app(app.id), name: app.name)
+                }
                 // Muted, the bar dims but still sets the level it comes back at.
                 AppSlider(id: app.id)
                     .opacity(muted ? 0.45 : 1)
@@ -674,6 +690,13 @@ private struct AppRow: View {
 
             if state.shaping == EQSpot(target: .app(app.id)) {
                 ShapePanel(target: .app(app.id))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .transition(.opacity)
+            }
+
+            if state.effecting == .app(app.id) {
+                EffectsPanel(target: .app(app.id), name: app.name)
                     .padding(.horizontal, 16)
                     .padding(.top, 4)
                     .transition(.opacity)

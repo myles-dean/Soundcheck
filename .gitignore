@@ -7,3 +7,5 @@ App/Info.plist
 App/Soundcheck.entitlements
 Extension/Safari/Info.plist
 Extension/Safari/Safari.entitlements
+# App Store screenshots and art (made from the simulators; regenerate rather than keep)
+Companion/StoreAssets/

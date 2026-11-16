@@ -1,28 +1,59 @@
 {
-  "fill" : {
-    "automatic-gradient" : "srgb:1.00000,0.17647,0.33333,1.00000"
+  "fill": {
+    "linear-gradient": [
+      "srgb:1.00000,0.30000,0.45000,1.00000",
+      "srgb:1.00000,0.00000,0.18000,1.00000"
+    ],
+    "orientation": {
+      "start": {
+        "x": 0.5,
+        "y": 0
+      },
+      "stop": {
+        "x": 0.5,
+        "y": 1
+      }
+    }
   },
-  "groups" : [
+  "groups": [
     {
-      "layers" : [
+      "layers": [
         {
-          "fill-specializations" : [
-            { "value" : { "solid" : "srgb:1.00000,1.00000,1.00000,1.00000" } },
-            { "appearance" : "dark", "value" : { "solid" : "srgb:1.00000,0.41961,0.52941,1.00000" } }
+          "fill-specializations": [
+            {
+              "value": {
+                "solid": "srgb:1.00000,1.00000,1.00000,1.00000"
+              }
+            },
+            {
+              "appearance": "dark",
+              "value": {
+                "solid": "srgb:1.00000,0.24000,0.39000,1.00000"
+              }
+            }
           ],
-          "image-name" : "glyph.svg",
-          "name" : "glyph",
-          "position" : {
-            "scale" : 5.0,
-            "translation-in-points" : [ 0, 0 ]
+          "image-name": "glyph.svg",
+          "name": "glyph",
+          "position": {
+            "scale": 5.0,
+            "translation-in-points": [
+              0,
+              0
+            ]
           }
         }
       ],
-      "shadow" : { "kind" : "neutral", "opacity" : 0.5 },
-      "translucency" : { "enabled" : true, "value" : 0.5 }
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.5
+      },
+      "translucency": {
+        "enabled": true,
+        "value": 0.5
+      }
     }
   ],
-  "supported-platforms" : {
-    "squares" : "shared"
+  "supported-platforms": {
+    "squares": "shared"
   }
 }

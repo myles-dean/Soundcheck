@@ -22,10 +22,11 @@ final class StatusItemController: NSObject {
     var onClick: (() -> Void)?
 
     override init() {
-        // Wide enough for the speaker with all its waves, so the icon doesn't change width (and
-        // nudge the other menu bar icons) when it's muted.
-        let width = (NSImage(systemSymbolName: "speaker.wave.3.fill", accessibilityDescription: nil)?
-            .withSymbolConfiguration(Self.symbolConfiguration)?.size.width ?? 24) + 10
+        // Exactly the speaker with all its waves, as macOS's own Sound icon (the menu bar adds the
+        // same padding around every item), so the icon doesn't change width (and nudge the other
+        // menu bar icons) when it's muted.
+        let width = NSImage(systemSymbolName: "speaker.wave.3.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(Self.symbolConfiguration)?.size.width ?? 24
         item = NSStatusBar.system.statusItem(withLength: ceil(width))
         super.init()
         item.autosaveName = "Soundcheck"

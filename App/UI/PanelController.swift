@@ -22,6 +22,9 @@ final class PanelState {
     var shaping: EQSpot?
     /// The bar whose list of microphones to hear is open (right-clicking its headphones button).
     var hearing: EQSpot?
+    /// The app or microphone whose effects are open, and the effect showing its controls.
+    var effecting: AudioEngine.ShapeTarget?
+    var openEffect: UUID?
     /// Browsers whose tabs are listed under them in Apps.
     var openBrowsers: Set<String> = []
 
@@ -36,6 +39,8 @@ final class PanelState {
         appsOpen = false
         shaping = nil
         hearing = nil
+        effecting = nil
+        openEffect = nil
     }
 }
 

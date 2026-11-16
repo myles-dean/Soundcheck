@@ -32,6 +32,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Updater.shared.start()
         BrowserTabs.shared.onCallsChanged = { AudioEngine.shared.browserCallsChanged() }
         BrowserTabs.shared.start()
+        // Soundcheck Companion (iPhone and iPad) finds this Mac on the network.
+        CompanionHub.shared.start()
 
         statusItem = StatusItemController()
         panel = PanelController()
@@ -85,6 +87,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Effects.shared.saveNow()
         quit()
         return .terminateNow
     }

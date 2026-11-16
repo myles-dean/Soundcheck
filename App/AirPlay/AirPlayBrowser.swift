@@ -77,7 +77,7 @@ import dnssd
         found.removeAll()
         addresses.removeAll()
         failedResolves.removeAll()
-        if !speakers.isEmpty { speakers = [] }
+        if speakers != companions { speakers = companions } // companions don't need browsing
     }
 
     private func browser(type: String, changedTo state: NWBrowser.State) {
@@ -184,7 +184,17 @@ import dnssd
                 raopServiceName: entry.raop?.key.name, airplayServiceName: entry.airplay?.key.name))
         }
         list.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        list = companions + list
         if list != speakers { speakers = list }
+    }
+
+    /// Soundcheck Companion's iPhones and iPads, which play like AirPlay speakers (listed first).
+    private var companions: [AirPlaySpeaker] = []
+
+    func setCompanions(_ companions: [AirPlaySpeaker]) {
+        guard companions != self.companions else { return }
+        self.companions = companions
+        rebuild()
     }
 
     private func isThisMac(_ host: String) -> Bool {
